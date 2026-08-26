@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.3"
+__version__ = "10.2.4"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -232,6 +232,7 @@ class Plugin(BasePlugin):
         self._is_running = True
         self._xposed_unhooks: List[Any] = []
         self._active_reply_rgb: int = 0
+        self._saved_active_folder_id: int = 0
         self._json_cache_file = None
 
         if HAS_ZWYLIB:
@@ -481,12 +482,39 @@ class Plugin(BasePlugin):
 
         return default
 
+    def _sync_local_ayuconfig(self, acc_idx: int):
+        try:
+            from com.radolyn.ayugram import AyuConfig
+            from org.telegram.messenger import UserConfig
+            curr_acc = getattr(UserConfig, "selectedAccount", 0)
+            if acc_idx == curr_acc:
+                u_cfg = UserConfig.getInstance(acc_idx)
+                uid = int(u_cfg.getClientUserId() or 0) if u_cfg else 0
+                sel_p = self._get_profile_dict_for_slot(acc_idx, uid)
+                if hasattr(AyuConfig, "nameColor"):
+                    AyuConfig.nameColor = _safe_int(sel_p.get("name_color", 0))
+                if hasattr(AyuConfig, "nameCustomEmojiId"):
+                    AyuConfig.nameCustomEmojiId = _safe_int(sel_p.get("name_bg_emoji_id", 0))
+                if hasattr(AyuConfig, "profileColor"):
+                    AyuConfig.profileColor = _safe_int(sel_p.get("profile_color", 0))
+                if hasattr(AyuConfig, "profileCustomEmojiId"):
+                    AyuConfig.profileCustomEmojiId = _safe_int(sel_p.get("profile_bg_emoji_id", 0))
+                if hasattr(AyuConfig, "statusEmojiId"):
+                    AyuConfig.statusEmojiId = _safe_int(sel_p.get("emoji_status_id", 0))
+                if hasattr(AyuConfig, "saveConfig"):
+                    AyuConfig.saveConfig()
+                elif hasattr(AyuConfig, "save"):
+                    AyuConfig.save()
+        except Exception:
+            pass
+
     def _set_slot_val(self, acc_idx: int, key: str, val: Any):
         slot_key = f"slot_{acc_idx}_{key}"
         self.set_setting(slot_key, val)
         self.set_setting(f"slot_{acc_idx}_configured", True, reload_settings=False)
         if acc_idx == 0:
             self.set_setting(f"my_{key}", val)
+        self._sync_local_ayuconfig(acc_idx)
 
     def _get_profile_dict_for_slot(self, acc_idx: int, user_id: int) -> Dict[str, Any]:
         default_name_c = 0
@@ -1334,6 +1362,55 @@ class Plugin(BasePlugin):
                     except Exception as e:
                         log(f"SyncProfile: hook MessagesStorage method {m} error: {e}")
 
+            DialogsActivityClass = find_class("org.telegram.ui.DialogsActivity")
+            if DialogsActivityClass:
+                class DialogsActivityLifecycleHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            act = getattr(param, "thisObject", None)
+                            if act:
+                                for f_name in ("currentFilterId", "filterId", "selectedFilterId", "folderId"):
+                                    if hasattr(act, f_name):
+                                        val = getattr(act, f_name, 0)
+                                        if val and isinstance(val, int) and val > 0:
+                                            plugin_self._saved_active_folder_id = val
+                                            break
+                        except Exception:
+                            pass
+
+                    def after_hooked_method(self, param):
+                        try:
+                            act = getattr(param, "thisObject", None)
+                            if act:
+                                saved_fid = getattr(plugin_self, "_saved_active_folder_id", 0)
+                                if saved_fid > 0:
+                                    for f_name in ("currentFilterId", "filterId", "selectedFilterId", "folderId"):
+                                        if hasattr(act, f_name):
+                                            curr_val = getattr(act, f_name, 0)
+                                            if curr_val == 0:
+                                                setattr(act, f_name, saved_fid)
+                                                for sel_name in ("selectFolder", "selectTab", "selectDialogType"):
+                                                    if hasattr(act, sel_name):
+                                                        try:
+                                                            getattr(act, sel_name)(saved_fid)
+                                                            break
+                                                        except Exception:
+                                                            pass
+                                            break
+                        except Exception:
+                            pass
+
+                for m in DialogsActivityClass.getDeclaredMethods():
+                    try:
+                        m_name = m.getName()
+                        if m_name in ("onPause", "onResume"):
+                            m.setAccessible(True)
+                            un = self.hook_method(m, DialogsActivityLifecycleHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception as e:
+                        log(f"SyncProfile: hook DialogsActivity method {m} error: {e}")
+
             log(f"SyncProfile: Установлено {len(self._xposed_unhooks)} Java хуков.")
         except Exception as e:
             log(f"SyncProfile: Ошибка регистрации Java хуков: {e}")
@@ -1425,64 +1502,38 @@ class Plugin(BasePlugin):
                         
                         def on_batch_loaded():
                             try:
-                                from org.telegram.messenger import MessagesController, NotificationCenter
-                                for acc in range(4):
-                                    mc = MessagesController.getInstance(acc)
-                                    n_c = NotificationCenter.getInstance(acc)
-                                    if mc and n_c:
-                                        for u_id in found_ids:
-                                            u = mc.getUser(u_id)
-                                            if u:
-                                                self._patch_user_tl_object(u)
-                                                mc.putUser(u, True)
-                                                try:
-                                                    n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
-                                                except Exception:
-                                                    pass
-                                            fu = mc.getUserFull(u_id)
-                                            if fu:
-                                                self._patch_full_user_tl_object(fu, u_id)
-                                                mc.putUserFull(fu)
-                                                try:
-                                                    n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
-                                                except Exception:
-                                                    pass
-                                        try:
-                                            update_mask = getattr(NotificationCenter, "UPDATE_MASK_ALL", 0x7FFFFFFF)
-                                            n_c.postNotificationName(NotificationCenter.updateInterfaces, update_mask)
-                                        except Exception:
-                                            n_c.postNotificationName(NotificationCenter.updateInterfaces, 511)
-                                        for notif_name in (
-                                            "didUpdateMessagesViews",
-                                            "reloadDialogPhotos",
-                                            "emojiLoaded",
-                                            "peerColorsDidLoad",
-                                            "themeAccentListUpdated",
-                                        ):
+                                from org.telegram.messenger import MessagesController, NotificationCenter, UserConfig
+                                sel_acc = getattr(UserConfig, "selectedAccount", 0)
+                                mc = MessagesController.getInstance(sel_acc)
+                                n_c = NotificationCenter.getInstance(sel_acc)
+                                if mc and n_c:
+                                    for u_id in found_ids:
+                                        u = mc.getUser(u_id)
+                                        if u:
+                                            self._patch_user_tl_object(u)
+                                            mc.putUser(u, True)
                                             try:
-                                                n_id = getattr(NotificationCenter, notif_name, None)
-                                                if n_id is not None:
-                                                    n_c.postNotificationName(n_id)
+                                                n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
                                             except Exception:
                                                 pass
-
-                                g_nc = getattr(NotificationCenter, "getGlobalInstance", lambda: None)()
-                                if g_nc:
+                                        fu = mc.getUserFull(u_id)
+                                        if fu:
+                                            self._patch_full_user_tl_object(fu, u_id)
+                                            mc.putUserFull(fu)
+                                            try:
+                                                n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
+                                            except Exception:
+                                                pass
+                                    safe_mask = 1 | 2 | 4 | 8192
                                     try:
-                                        update_mask = getattr(NotificationCenter, "UPDATE_MASK_ALL", 0x7FFFFFFF)
-                                        g_nc.postNotificationName(NotificationCenter.updateInterfaces, update_mask)
+                                        n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
                                     except Exception:
                                         pass
-                                    for notif_name in (
-                                        "reloadDialogPhotos",
-                                        "emojiLoaded",
-                                        "peerColorsDidLoad",
-                                        "themeAccentListUpdated",
-                                    ):
+                                    for notif_name in ("didUpdateMessagesViews", "peerColorsDidLoad"):
                                         try:
                                             n_id = getattr(NotificationCenter, notif_name, None)
                                             if n_id is not None:
-                                                g_nc.postNotificationName(n_id)
+                                                n_c.postNotificationName(n_id)
                                         except Exception:
                                             pass
                             except Exception:
@@ -1510,7 +1561,7 @@ class Plugin(BasePlugin):
 
     def _keep_alive_sync_loop(self):
         while self._is_running:
-            time.sleep(12)
+            time.sleep(45)
             if not self._is_running:
                 break
             if self.get_setting("enable_sync", True):
@@ -1518,7 +1569,7 @@ class Plugin(BasePlugin):
 
     async def _async_keep_alive_sync_loop(self):
         while self._is_running:
-            await asyncio.sleep(12)
+            await asyncio.sleep(45)
             if not self._is_running:
                 break
             if self.get_setting("enable_sync", True):
@@ -1759,10 +1810,6 @@ class Plugin(BasePlugin):
                         u_cfg = UserConfig.getInstance(acc)
                         if not u_cfg or not u_cfg.isClientActivated():
                             continue
-                        try:
-                            u_cfg.loadConfig()
-                        except Exception:
-                            pass
 
                         mc = MessagesController.getInstance(acc)
                         ms = MessagesStorage.getInstance(acc)
@@ -1816,10 +1863,6 @@ class Plugin(BasePlugin):
 
                             mc.putUser(curr_u, True)
                             users_to_save.add(curr_u)
-                            try:
-                                u_cfg.saveConfig(False)
-                            except Exception:
-                                pass
 
                             fu_my = mc.getUserFull(my_acc_uid)
                             if fu_my:
@@ -1833,7 +1876,7 @@ class Plugin(BasePlugin):
 
                         if ms and users_to_save.size() > 0:
                             try:
-                                ms.putUsersAndChats(users_to_save, None, True, True)
+                                ms.putUsersAndChats(users_to_save, None, False, False)
                             except Exception:
                                 pass
 
@@ -1865,20 +1908,17 @@ class Plugin(BasePlugin):
                                     except Exception:
                                         pass
 
+                            # Safe update mask to prevent DialogsActivity folder/tab resets
+                            safe_mask = 1 | 2 | 4 | 8192
                             try:
-                                update_mask = getattr(NotificationCenter, "UPDATE_MASK_ALL", 0x7FFFFFFF)
-                                n_c.postNotificationName(NotificationCenter.updateInterfaces, update_mask)
+                                n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
                             except Exception:
-                                n_c.postNotificationName(NotificationCenter.updateInterfaces, 511)
+                                pass
 
                             for notif_name in (
-                                "mainUserInfoChanged",
-                                "currentUserPremiumStatusChanged",
-                                "reloadDialogPhotos",
                                 "didUpdateMessagesViews",
-                                "emojiLoaded",
                                 "peerColorsDidLoad",
-                                "themeAccentListUpdated",
+                                "reloadDialogPhotos",
                             ):
                                 try:
                                     n_id = getattr(NotificationCenter, notif_name, None)
@@ -1887,53 +1927,8 @@ class Plugin(BasePlugin):
                                 except Exception:
                                     pass
 
-                        if acc == getattr(UserConfig, "selectedAccount", 0):
-                            try:
-                                from com.radolyn.ayugram import AyuConfig
-                                sel_p = self._get_profile_dict_for_slot(acc, my_acc_uid)
-                                if hasattr(AyuConfig, "nameColor"):
-                                    AyuConfig.nameColor = _safe_int(sel_p.get("name_color", 0))
-                                if hasattr(AyuConfig, "nameCustomEmojiId"):
-                                    AyuConfig.nameCustomEmojiId = _safe_int(sel_p.get("name_bg_emoji_id", 0))
-                                if hasattr(AyuConfig, "profileColor"):
-                                    AyuConfig.profileColor = _safe_int(sel_p.get("profile_color", 0))
-                                if hasattr(AyuConfig, "profileCustomEmojiId"):
-                                    AyuConfig.profileCustomEmojiId = _safe_int(sel_p.get("profile_bg_emoji_id", 0))
-                                if hasattr(AyuConfig, "statusEmojiId"):
-                                    AyuConfig.statusEmojiId = _safe_int(sel_p.get("emoji_status_id", 0))
-                                if hasattr(AyuConfig, "saveConfig"):
-                                    AyuConfig.saveConfig()
-                                elif hasattr(AyuConfig, "save"):
-                                    AyuConfig.save()
-                            except Exception:
-                                pass
                     except Exception as e:
                         log(f"SyncProfile: _apply_all_to_all_accounts acc {acc} error: {e}")
-
-                try:
-                    g_nc = getattr(NotificationCenter, "getGlobalInstance", lambda: None)()
-                    if g_nc:
-                        try:
-                            update_mask = getattr(NotificationCenter, "UPDATE_MASK_ALL", 0x7FFFFFFF)
-                            g_nc.postNotificationName(NotificationCenter.updateInterfaces, update_mask)
-                        except Exception:
-                            pass
-                        for notif_name in (
-                            "mainUserInfoChanged",
-                            "currentUserPremiumStatusChanged",
-                            "reloadDialogPhotos",
-                            "emojiLoaded",
-                            "peerColorsDidLoad",
-                            "themeAccentListUpdated",
-                        ):
-                            try:
-                                n_id = getattr(NotificationCenter, notif_name, None)
-                                if n_id is not None:
-                                    g_nc.postNotificationName(n_id)
-                            except Exception:
-                                pass
-                except Exception:
-                    pass
 
             except Exception as e:
                 log(f"SyncProfile: _apply_all_to_all_accounts error: {e}")
