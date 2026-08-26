@@ -19,6 +19,9 @@ htmlcov/
 *.code-workspace
 SKILL.md
 sync(Success).plugin
+sync (SUCCESS).plugin
+sync (SUCCESS)*.plugin
+sync.plugin
 
 # OS
 .DS_Store
