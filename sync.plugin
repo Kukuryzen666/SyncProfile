@@ -56,7 +56,7 @@ __id__ = 'sync_profile'
 __name__ = 'SyncProfile'
 __description__ = 'Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib.'
 __author__ = '@Kukuryzen'
-__version__ = '10.1.3'
+__version__ = '10.1.4'
 __icon__ = 'exteraPlugins/1'
 __app_version__ = '>=12.5.1'
 __sdk_version__ = '>=1.4.3.3'
@@ -417,8 +417,7 @@ class SyncProfilePlugin(BasePlugin):
         em_str = str(self._get_slot_val(acc_idx, 'emoji_status_id', DEFAULT_EMOJI_STATUS_ID) or '').strip()
         em_id = int(em_str) if em_str and em_str.isdigit() and (int(em_str) != 0) else 0
         prem = bool(self._get_slot_val(acc_idx, 'premium', True))
-        custom_badge = str(self._get_slot_val(acc_idx, 'custom_badge', '') or '').strip()[:64]
-        return {'user_id': user_id, 'premium': prem, 'emoji_status_id': em_id, 'name_color': name_c, 'name_bg_emoji_id': name_bg, 'profile_color': prof_c, 'profile_bg_emoji_id': prof_bg, 'custom_badge': custom_badge, 'client_type': 'AyuGram', 'auth_key': self.get_setting('auth_key', '').strip()}
+        return {'user_id': user_id, 'premium': prem, 'emoji_status_id': em_id, 'name_color': name_c, 'name_bg_emoji_id': name_bg, 'profile_color': prof_c, 'profile_bg_emoji_id': prof_bg, 'client_type': 'AyuGram', 'auth_key': self.get_setting('auth_key', '').strip()}
 
     def get_cached_profile(self, uid: int) -> Optional[Dict[str, Any]]:
         if not uid or uid <= 0:
@@ -508,29 +507,6 @@ class SyncProfilePlugin(BasePlugin):
         except Exception:
             pass
         return 0
-
-    def _resolve_badge_for_user(self, user_or_uid: Any) -> str:
-        if not user_or_uid:
-            return ''
-        uid = int(getattr(user_or_uid, 'id', user_or_uid) or 0) if not isinstance(user_or_uid, int) else user_or_uid
-        if uid > 0:
-            prof = self.get_cached_profile(uid)
-            if prof and prof.get('custom_badge'):
-                badge_text = str(prof['custom_badge']).strip()
-                if badge_text:
-                    return badge_text
-            try:
-                from org.telegram.messenger import UserConfig
-                max_accs = getattr(UserConfig, 'MAX_ACCOUNT_COUNT', 4)
-                for a in range(max_accs):
-                    u_c = UserConfig.getInstance(a)
-                    if u_c and int(u_c.getClientUserId() or 0) == uid:
-                        slot_badge = str(self._get_slot_val(a, 'custom_badge', '') or '').strip()
-                        if slot_badge:
-                            return slot_badge
-            except Exception:
-                pass
-        return ''
 
     def _extract_reply_uid(self, msg: Any) -> int:
         if not msg:
@@ -936,29 +912,6 @@ class SyncProfilePlugin(BasePlugin):
                         except Exception:
                             pass
 
-                class UserObjectFormatNameHook(MethodHook):
-
-                    def after_hooked_method(self, param):
-                        try:
-                            if not plugin_self.get_setting('enable_custom_badges', True):
-                                return
-                            args = getattr(param, 'args', None)
-                            user = None
-                            if args:
-                                for arg in args:
-                                    if hasattr(arg, 'id'):
-                                        user = arg
-                                        break
-                            if not user:
-                                user = getattr(param, 'thisObject', None)
-                            if user:
-                                badge = plugin_self._resolve_badge_for_user(user)
-                                if badge:
-                                    orig = param.getResult()
-                                    if orig and isinstance(orig, str) and (f'[{badge}]' not in orig):
-                                        param.setResult(f'{orig} [{badge}]')
-                        except Exception:
-                            pass
                 uo_methods = UserObjectClass.getDeclaredMethods()
                 for m in uo_methods:
                     try:
@@ -998,11 +951,7 @@ class SyncProfilePlugin(BasePlugin):
                             un = self.hook_method(m, GetPeerColorForUserHook())
                             if un:
                                 self._xposed_unhooks.append(un)
-                        elif m_name in ('formatName', 'getUserName'):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, UserObjectFormatNameHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
+
                     except Exception as e:
                         log(f'SyncProfile: hook UserObject method {m} error: {e}')
             if MessageObjectClass:
@@ -1241,30 +1190,6 @@ class SyncProfilePlugin(BasePlugin):
                         except Exception:
                             pass
 
-                class MCGetUserNameHook(MethodHook):
-
-                    def after_hooked_method(self, param):
-                        try:
-                            if not plugin_self.get_setting('enable_custom_badges', True):
-                                return
-                            args = getattr(param, 'args', None)
-                            user = None
-                            if args:
-                                for arg in args:
-                                    if hasattr(arg, 'id'):
-                                        user = arg
-                                        break
-                                    elif isinstance(arg, int) and arg > 0:
-                                        user = arg
-                                        break
-                            if user:
-                                badge = plugin_self._resolve_badge_for_user(user)
-                                if badge:
-                                    orig = param.getResult()
-                                    if orig and isinstance(orig, str) and (f'[{badge}]' not in orig):
-                                        param.setResult(f'{orig} [{badge}]')
-                        except Exception:
-                            pass
                 mc_methods = MessagesControllerClass.getDeclaredMethods()
                 for m in mc_methods:
                     try:
@@ -1284,11 +1209,7 @@ class SyncProfilePlugin(BasePlugin):
                             unhook = self.hook_method(m, MessagesControllerIsPremiumHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                        elif m_name in ('getUserName', 'formatName', 'getPeerName'):
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, MCGetUserNameHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
+
                     except Exception as e:
                         log(f'SyncProfile: hook MessagesController method {m} error: {e}')
             if MessagesStorageClass:
@@ -2392,22 +2313,6 @@ class SyncProfilePlugin(BasePlugin):
                 bulletins.show_success(f"✨ Сохранено: {clean_val or 'Очищено'}")
         async_manager.run_task(_worker())
 
-    def _interactive_input_badge(self, acc_idx: int):
-        if not HAS_ZWYLIB:
-            return
-
-        async def _worker():
-            cur_val = str(self._get_slot_val(acc_idx, 'custom_badge', '') or '')
-            res = await UI.StringInputDialog.show('🏷️ Кастомный бейдж', initial_text=cur_val, hint='Например: VIP, Dev, Admin, ⚡ Pro')
-            if res is not None:
-                clean_val = str(res).strip()[:64]
-                self._set_slot_val(acc_idx, 'custom_badge', clean_val)
-                self._save_local_profiles_cache(force=True)
-                self._apply_all_to_all_accounts()
-                self.push_specific_account(acc_idx, show_ui_bulletin=False)
-                bulletins.show_success(f"🏷️ Бейдж сохранен: {clean_val or 'Очищен'}")
-        async_manager.run_task(_worker())
-
     def _interactive_live_preview_dialog(self, acc_idx: int):
         active_accs = self._get_active_accounts_data()
         acc_info = next((a for a in active_accs if a.get('acc_idx') == acc_idx), None)
@@ -2416,17 +2321,15 @@ class SyncProfilePlugin(BasePlugin):
         cur_prem = bool(self._get_slot_val(acc_idx, 'premium', True))
         cur_name_c = int(self._get_slot_val(acc_idx, 'name_color', 0) or 0)
         cur_prof_c = int(self._get_slot_val(acc_idx, 'profile_color', 0) or 0)
-        cur_badge = str(self._get_slot_val(acc_idx, 'custom_badge', '') or '').strip()
         cur_em_id = str(self._get_slot_val(acc_idx, 'emoji_status_id', '') or '').strip()
         cur_name_bg = str(self._get_slot_val(acc_idx, 'name_bg_emoji_id', '') or '').strip()
         cur_prof_bg = str(self._get_slot_val(acc_idx, 'profile_bg_emoji_id', '') or '').strip()
         name_c_str = NAME_AND_REPLY_COLORS[cur_name_c] if 0 <= cur_name_c < len(NAME_AND_REPLY_COLORS) else f'ID {cur_name_c}'
         prof_c_str = PROFILE_COLORS[cur_prof_c] if 0 <= cur_prof_c < len(PROFILE_COLORS) else f'ID {cur_prof_c}'
-        badge_display = f'[{cur_badge}]' if cur_badge else '—'
         em_display = cur_em_id if cur_em_id else '—'
         name_bg_display = cur_name_bg if cur_name_bg else '—'
         prof_bg_display = cur_prof_bg if cur_prof_bg else '—'
-        preview_msg = f"👤 Аккаунт: {name} (ID: {uid})\n\n⭐ TG Premium: {('Активен' if cur_prem else 'Выключен')}\n🎨 Цвет имени: {name_c_str}\n🖼️ Цвет обложки: {prof_c_str}\n🏷️ Кастомный бейдж: {badge_display}\n⭐ Эмодзи-статус: {em_display}\n✨ Узор имени: {name_bg_display}\n✨ Узор обложки: {prof_bg_display}\n\n💬 Пример сообщения:\n┌ {name} {(f'[{cur_badge}] ' if cur_badge else '')}{('⭐' if cur_prem else '')}\n│ Профиль синхронизирован через SyncProfile Node ✨\n└ 12:34 ✓✓"
+        preview_msg = f"👤 Аккаунт: {name} (ID: {uid})\n\n⭐ TG Premium: {('Активен' if cur_prem else 'Выключен')}\n🎨 Цвет имени: {name_c_str}\n🖼️ Цвет обложки: {prof_c_str}\n⭐ Эмодзи-статус: {em_display}\n✨ Узор имени: {name_bg_display}\n✨ Узор обложки: {prof_bg_display}\n\n💬 Пример сообщения:\n┌ {name} {('⭐' if cur_prem else '')}\n│ Профиль синхронизирован через SyncProfile Node ✨\n└ 12:34 ✓✓"
         if HAS_ZWYLIB:
             dialog = UI.AlertDialog(title=f'👁️ Предпросмотр: {name}', text=preview_msg, buttons=[UI.AlertButton('Закрыть'), UI.AlertButton('🚀 Опубликовать', on_click=lambda b, w: self.push_specific_account(acc_idx, show_ui_bulletin=True))])
             dialog.show()
@@ -2582,7 +2485,7 @@ class SyncProfilePlugin(BasePlugin):
     def create_settings(self) -> List[Any]:
         with self._sync_lock:
             total_cached = len(self._profiles_cache)
-        items = [Header(text='Синхронизация профилей SyncProfile'), Switch(key='enable_sync', text='Включить SyncProfile', default=True, subtext='Отображать кастомные профили и цвета других пользователей плагина', icon='msg_sync'), Switch(key='enable_local_premium', text='Локальный Telegram Premium', default=True, subtext='Активировать встроенный локальный Premium', icon='msg_premium', on_change=lambda val: run_on_ui_thread(self._on_local_premium_toggle)), Switch(key='enable_custom_badges', text='Отображать кастомные бейджи', default=True, subtext='Показывать кастомные бейджи рядом с именами в чатах и профилях', icon='msg_verified', on_change=lambda val: run_on_ui_thread(self._apply_all_to_all_accounts))]
+        items = [Header(text='Синхронизация профилей SyncProfile'), Switch(key='enable_sync', text='Включить SyncProfile', default=True, subtext='Отображать кастомные профили и цвета других пользователей плагина', icon='msg_sync'), Switch(key='enable_local_premium', text='Локальный Telegram Premium', default=True, subtext='Активировать встроенный локальный Premium', icon='msg_premium', on_change=lambda val: run_on_ui_thread(self._on_local_premium_toggle))]
         if ALLOW_CUSTOM_SERVER_CONFIG:
             items.extend([Input(key='server_url', text='URL сервера', default=DEFAULT_SERVER_URL, subtext='Адрес сервера (https://sync.efn.mom)', icon='msg_link'), Input(key='custom_cookie', text='Секретный токен Cookie', default=DEFAULT_SECRET_COOKIE, subtext='Ключ авторизации для доступа к sync.efn.mom', icon='msg_secret')])
         items.extend([Divider(text='Общие действия'), Text(text='⚡ Быстрая дельта-синхронизация', subtext='Запросить только новые и измененные профили с сервера (быстро и экономно)', icon='msg_sync', accent=True, on_click=lambda view: self.sync_delta_updates_from_server(show_bulletin=True)), Text(text='✨ Считать из Fake Premium для текущего аккаунта', subtext='Скопировать все цвета и эмодзи из Fake Premium в настройки', icon='msg_premium', accent=True, on_click=lambda view: self.grab_settings_from_fake_premium(-1, show_bulletin=True)), Text(text='🌐 Опубликовать ВСЕ мои аккаунты сразу', subtext='Отправить индивидуальные цвета всех аккаунтов на сервер в один клик', icon='msg_send', accent=True, on_click=lambda view: self.push_all_accounts(show_ui_bulletin=True)), Text(text=f'📥 Полное скачивание базы ({total_cached} в кэше)', subtext='Удалить старый локальный кэш и начисто скачать актуальную базу с сервера', icon='msg_download', accent=True, on_click=lambda view: self._interactive_sync_bottom_sheet())])
@@ -2607,8 +2510,7 @@ class SyncProfilePlugin(BasePlugin):
             cur_name_bg = self._get_slot_val(acc_idx, 'name_bg_emoji_id', DEFAULT_NAME_BG_EMOJI) or ''
             cur_prof_bg = self._get_slot_val(acc_idx, 'profile_bg_emoji_id', DEFAULT_PROFILE_BG_EMOJI) or ''
             cur_em_id = self._get_slot_val(acc_idx, 'emoji_status_id', DEFAULT_EMOJI_STATUS_ID) or ''
-            cur_badge = self._get_slot_val(acc_idx, 'custom_badge', '') or ''
-            items.extend([Divider(text=section_title), Text(text=f'👁️ Предпросмотр профиля {name}', subtext='Посмотреть, как ваш профиль и сообщения видят другие', icon='msg_info', accent=True, on_click=lambda view, a=acc_idx: self._interactive_live_preview_dialog(a)), Text(text=f'✨ Считать из Fake Premium для {name}', subtext='Автоматически загрузить цвета и эмодзи из Fake Premium', icon='msg_premium', accent=True, on_click=lambda view, a=acc_idx: self.grab_settings_from_fake_premium(a, show_bulletin=True)), Text(text=f'🚀 Опубликовать профиль {name}', subtext=f'Отправить цвета и узоры для ID {uid} на сервер', icon='msg_send', accent=True, on_click=lambda view, a=acc_idx: self.push_specific_account(a, show_ui_bulletin=True)), Switch(key=f'slot_{acc_idx}_premium', text=f'Telegram Premium [{name}]', default=cur_prem, subtext=f'Отображать Premium-статус и звездочку для {name}', icon='msg_premium', on_change=lambda val: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_custom_badge', text=f'Кастомный бейдж [{name}]', default=cur_badge, subtext='Текст плашки рядом с ником (например: VIP, Dev, Admin, ⚡ Pro)', icon='msg_verified', on_change=lambda val: run_on_ui_thread(self._apply_all_to_all_accounts)), Selector(key=f'slot_{acc_idx}_name_color', text=f'Цвет имени и реплаев [{name}]', default=cur_name_c, items=NAME_AND_REPLY_COLORS, icon='msg_palette', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_name_bg_emoji_id', text=f'Узор имени и реплаев [{name}]', default=cur_name_bg, subtext='Document ID эмодзи-узора (оставьте пустым, если не нужен)', icon='msg_background'), Selector(key=f'slot_{acc_idx}_profile_color', text=f'Цвет обложки [{name}]', default=cur_prof_c, items=PROFILE_COLORS, icon='msg_theme', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_profile_bg_emoji_id', text=f'Узор обложки [{name}]', default=cur_prof_bg, subtext='ID эмодзи-узора (значки вокруг аватарки, оставьте пустым)', icon='msg_background'), Input(key=f'slot_{acc_idx}_emoji_status_id', text=f'Эмодзи-статус [{name}]', default=cur_em_id, subtext='ID эмодзи-статуса рядом с именем (оставьте пустым, если не нужен)', icon='msg_emoji')])
+            items.extend([Divider(text=section_title), Text(text=f'👁️ Предпросмотр профиля {name}', subtext='Посмотреть, как ваш профиль и сообщения видят другие', icon='msg_info', accent=True, on_click=lambda view, a=acc_idx: self._interactive_live_preview_dialog(a)), Text(text=f'✨ Считать из Fake Premium для {name}', subtext='Автоматически загрузить цвета и эмодзи из Fake Premium', icon='msg_premium', accent=True, on_click=lambda view, a=acc_idx: self.grab_settings_from_fake_premium(a, show_bulletin=True)), Text(text=f'🚀 Опубликовать профиль {name}', subtext=f'Отправить цвета и узоры для ID {uid} на сервер', icon='msg_send', accent=True, on_click=lambda view, a=acc_idx: self.push_specific_account(a, show_ui_bulletin=True)), Switch(key=f'slot_{acc_idx}_premium', text=f'Telegram Premium [{name}]', default=cur_prem, subtext=f'Отображать Premium-статус и звездочку для {name}', icon='msg_premium', on_change=lambda val: run_on_ui_thread(self._apply_all_to_all_accounts)), Selector(key=f'slot_{acc_idx}_name_color', text=f'Цвет имени и реплаев [{name}]', default=cur_name_c, items=NAME_AND_REPLY_COLORS, icon='msg_palette', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_name_bg_emoji_id', text=f'Узор имени и реплаев [{name}]', default=cur_name_bg, subtext='Document ID эмодзи-узора (оставьте пустым, если не нужен)', icon='msg_background'), Selector(key=f'slot_{acc_idx}_profile_color', text=f'Цвет обложки [{name}]', default=cur_prof_c, items=PROFILE_COLORS, icon='msg_theme', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_profile_bg_emoji_id', text=f'Узор обложки [{name}]', default=cur_prof_bg, subtext='ID эмодзи-узора (значки вокруг аватарки, оставьте пустым)', icon='msg_background'), Input(key=f'slot_{acc_idx}_emoji_status_id', text=f'Эмодзи-статус [{name}]', default=cur_em_id, subtext='ID эмодзи-статуса рядом с именем (оставьте пустым, если не нужен)', icon='msg_emoji')])
         items.extend([Divider(text='Действия'), Text(text='⭐ Активировать локальный Premium', subtext='Принудительно включить localPremium', icon='msg_premium', on_click=lambda view: (self._ensure_ayugram_premium(), bulletins.show_success('Локальный Premium активирован!'))), Text(text='🧹 Очистить локальный кэш', icon='msg_delete', red=True, on_click=self._interactive_clear_cache_dialog)])
         return items
 
