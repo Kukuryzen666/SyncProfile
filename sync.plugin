@@ -56,7 +56,7 @@ __id__ = 'sync_profile'
 __name__ = 'SyncProfile'
 __description__ = 'Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib.'
 __author__ = '@Kukuryzen'
-__version__ = '10.1.4'
+__version__ = '10.1.5'
 __icon__ = 'exteraPlugins/1'
 __app_version__ = '>=12.5.1'
 __sdk_version__ = '>=1.4.3.3'
@@ -1961,7 +1961,7 @@ class SyncProfilePlugin(BasePlugin):
         self._patch_response_entities(updates)
         return HookResult()
 
-    def grab_settings_from_fake_premium(self, target_acc_idx: int=-1, show_bulletin: bool=True):
+    def grab_settings_from_local_premium(self, target_acc_idx: int=-1, show_bulletin: bool=True):
         try:
             from org.telegram.messenger import UserConfig
             if target_acc_idx == -1:
@@ -2111,12 +2111,12 @@ class SyncProfilePlugin(BasePlugin):
             if found_any:
                 cur_nc = self._get_slot_val(target_acc_idx, 'name_color', 0)
                 cur_pc = self._get_slot_val(target_acc_idx, 'profile_color', 0)
-                run_on_ui_thread(lambda: BulletinHelper.show_success(f"✨ Настройки Fake Premium загружены для {name}!\nИмя/Реплаи: #{cur_nc} | Обложка: #{cur_pc}\nНажмите '🚀 Опубликовать', чтобы отправить на сервер!"))
+                run_on_ui_thread(lambda: BulletinHelper.show_success(f"✨ Настройки локального Premium загружены для {name}!\nИмя/Реплаи: #{cur_nc} | Обложка: #{cur_pc}\nНажмите '🚀 Опубликовать', чтобы отправить на сервер!"))
             else:
                 run_on_ui_thread(lambda: BulletinHelper.show_info(f"В Telegram сначала нажмите 'Применить стиль' в меню цветов, а затем повторите считывание."))
 
     def grab_settings_from_ayugram(self, target_acc_idx: int=-1):
-        self.grab_settings_from_fake_premium(target_acc_idx=target_acc_idx, show_bulletin=True)
+        self.grab_settings_from_local_premium(target_acc_idx=target_acc_idx, show_bulletin=True)
 
     def push_specific_account(self, acc_idx: int, show_ui_bulletin: bool=True):
         uid = 0
@@ -2313,29 +2313,6 @@ class SyncProfilePlugin(BasePlugin):
                 bulletins.show_success(f"✨ Сохранено: {clean_val or 'Очищено'}")
         async_manager.run_task(_worker())
 
-    def _interactive_live_preview_dialog(self, acc_idx: int):
-        active_accs = self._get_active_accounts_data()
-        acc_info = next((a for a in active_accs if a.get('acc_idx') == acc_idx), None)
-        uid = acc_info.get('user_id', 0) if acc_info else 0
-        name = acc_info.get('name', f'Аккаунт {acc_idx + 1}') if acc_info else f'Аккаунт {acc_idx + 1}'
-        cur_prem = bool(self._get_slot_val(acc_idx, 'premium', True))
-        cur_name_c = int(self._get_slot_val(acc_idx, 'name_color', 0) or 0)
-        cur_prof_c = int(self._get_slot_val(acc_idx, 'profile_color', 0) or 0)
-        cur_em_id = str(self._get_slot_val(acc_idx, 'emoji_status_id', '') or '').strip()
-        cur_name_bg = str(self._get_slot_val(acc_idx, 'name_bg_emoji_id', '') or '').strip()
-        cur_prof_bg = str(self._get_slot_val(acc_idx, 'profile_bg_emoji_id', '') or '').strip()
-        name_c_str = NAME_AND_REPLY_COLORS[cur_name_c] if 0 <= cur_name_c < len(NAME_AND_REPLY_COLORS) else f'ID {cur_name_c}'
-        prof_c_str = PROFILE_COLORS[cur_prof_c] if 0 <= cur_prof_c < len(PROFILE_COLORS) else f'ID {cur_prof_c}'
-        em_display = cur_em_id if cur_em_id else '—'
-        name_bg_display = cur_name_bg if cur_name_bg else '—'
-        prof_bg_display = cur_prof_bg if cur_prof_bg else '—'
-        preview_msg = f"👤 Аккаунт: {name} (ID: {uid})\n\n⭐ TG Premium: {('Активен' if cur_prem else 'Выключен')}\n🎨 Цвет имени: {name_c_str}\n🖼️ Цвет обложки: {prof_c_str}\n⭐ Эмодзи-статус: {em_display}\n✨ Узор имени: {name_bg_display}\n✨ Узор обложки: {prof_bg_display}\n\n💬 Пример сообщения:\n┌ {name} {('⭐' if cur_prem else '')}\n│ Профиль синхронизирован через SyncProfile Node ✨\n└ 12:34 ✓✓"
-        if HAS_ZWYLIB:
-            dialog = UI.AlertDialog(title=f'👁️ Предпросмотр: {name}', text=preview_msg, buttons=[UI.AlertButton('Закрыть'), UI.AlertButton('🚀 Опубликовать', on_click=lambda b, w: self.push_specific_account(acc_idx, show_ui_bulletin=True))])
-            dialog.show()
-        else:
-            bulletins.show_info(preview_msg)
-
     def _interactive_sync_bottom_sheet(self):
         if not HAS_ZWYLIB:
             threading.Thread(target=lambda: self.sync_full_database_from_server(show_bulletin=True, force_clean=True), daemon=True).start()
@@ -2488,7 +2465,7 @@ class SyncProfilePlugin(BasePlugin):
         items = [Header(text='Синхронизация профилей SyncProfile'), Switch(key='enable_sync', text='Включить SyncProfile', default=True, subtext='Отображать кастомные профили и цвета других пользователей плагина', icon='msg_sync'), Switch(key='enable_local_premium', text='Локальный Telegram Premium', default=True, subtext='Активировать встроенный локальный Premium', icon='msg_premium', on_change=lambda val: run_on_ui_thread(self._on_local_premium_toggle))]
         if ALLOW_CUSTOM_SERVER_CONFIG:
             items.extend([Input(key='server_url', text='URL сервера', default=DEFAULT_SERVER_URL, subtext='Адрес сервера (https://sync.efn.mom)', icon='msg_link'), Input(key='custom_cookie', text='Секретный токен Cookie', default=DEFAULT_SECRET_COOKIE, subtext='Ключ авторизации для доступа к sync.efn.mom', icon='msg_secret')])
-        items.extend([Divider(text='Общие действия'), Text(text='⚡ Быстрая дельта-синхронизация', subtext='Запросить только новые и измененные профили с сервера (быстро и экономно)', icon='msg_sync', accent=True, on_click=lambda view: self.sync_delta_updates_from_server(show_bulletin=True)), Text(text='✨ Считать из Fake Premium для текущего аккаунта', subtext='Скопировать все цвета и эмодзи из Fake Premium в настройки', icon='msg_premium', accent=True, on_click=lambda view: self.grab_settings_from_fake_premium(-1, show_bulletin=True)), Text(text='🌐 Опубликовать ВСЕ мои аккаунты сразу', subtext='Отправить индивидуальные цвета всех аккаунтов на сервер в один клик', icon='msg_send', accent=True, on_click=lambda view: self.push_all_accounts(show_ui_bulletin=True)), Text(text=f'📥 Полное скачивание базы ({total_cached} в кэше)', subtext='Удалить старый локальный кэш и начисто скачать актуальную базу с сервера', icon='msg_download', accent=True, on_click=lambda view: self._interactive_sync_bottom_sheet())])
+        items.extend([Divider(text='Общие действия'), Text(text='⚡ Быстрая дельта-синхронизация', subtext='Запросить только новые и измененные профили с сервера (быстро и экономно)', icon='msg_sync', accent=True, on_click=lambda view: self.sync_delta_updates_from_server(show_bulletin=True)), Text(text='✨ Считать из локального Premium для текущего аккаунта', subtext='Скопировать все цвета и эмодзи из локального Premium в настройки', icon='msg_premium', accent=True, on_click=lambda view: self.grab_settings_from_local_premium(-1, show_bulletin=True)), Text(text='🌐 Опубликовать ВСЕ мои аккаунты сразу', subtext='Отправить индивидуальные цвета всех аккаунтов на сервер в один клик', icon='msg_send', accent=True, on_click=lambda view: self.push_all_accounts(show_ui_bulletin=True)), Text(text=f'📥 Полное скачивание базы ({total_cached} в кэше)', subtext='Удалить старый локальный кэш и начисто скачать актуальную базу с сервера', icon='msg_download', accent=True, on_click=lambda view: self._interactive_sync_bottom_sheet())])
         active_accs = self._get_active_accounts_data()
         for acc_info in active_accs:
             acc_idx = acc_info.get('acc_idx', 0)
@@ -2510,7 +2487,7 @@ class SyncProfilePlugin(BasePlugin):
             cur_name_bg = self._get_slot_val(acc_idx, 'name_bg_emoji_id', DEFAULT_NAME_BG_EMOJI) or ''
             cur_prof_bg = self._get_slot_val(acc_idx, 'profile_bg_emoji_id', DEFAULT_PROFILE_BG_EMOJI) or ''
             cur_em_id = self._get_slot_val(acc_idx, 'emoji_status_id', DEFAULT_EMOJI_STATUS_ID) or ''
-            items.extend([Divider(text=section_title), Text(text=f'👁️ Предпросмотр профиля {name}', subtext='Посмотреть, как ваш профиль и сообщения видят другие', icon='msg_info', accent=True, on_click=lambda view, a=acc_idx: self._interactive_live_preview_dialog(a)), Text(text=f'✨ Считать из Fake Premium для {name}', subtext='Автоматически загрузить цвета и эмодзи из Fake Premium', icon='msg_premium', accent=True, on_click=lambda view, a=acc_idx: self.grab_settings_from_fake_premium(a, show_bulletin=True)), Text(text=f'🚀 Опубликовать профиль {name}', subtext=f'Отправить цвета и узоры для ID {uid} на сервер', icon='msg_send', accent=True, on_click=lambda view, a=acc_idx: self.push_specific_account(a, show_ui_bulletin=True)), Switch(key=f'slot_{acc_idx}_premium', text=f'Telegram Premium [{name}]', default=cur_prem, subtext=f'Отображать Premium-статус и звездочку для {name}', icon='msg_premium', on_change=lambda val: run_on_ui_thread(self._apply_all_to_all_accounts)), Selector(key=f'slot_{acc_idx}_name_color', text=f'Цвет имени и реплаев [{name}]', default=cur_name_c, items=NAME_AND_REPLY_COLORS, icon='msg_palette', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_name_bg_emoji_id', text=f'Узор имени и реплаев [{name}]', default=cur_name_bg, subtext='Document ID эмодзи-узора (оставьте пустым, если не нужен)', icon='msg_background'), Selector(key=f'slot_{acc_idx}_profile_color', text=f'Цвет обложки [{name}]', default=cur_prof_c, items=PROFILE_COLORS, icon='msg_theme', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_profile_bg_emoji_id', text=f'Узор обложки [{name}]', default=cur_prof_bg, subtext='ID эмодзи-узора (значки вокруг аватарки, оставьте пустым)', icon='msg_background'), Input(key=f'slot_{acc_idx}_emoji_status_id', text=f'Эмодзи-статус [{name}]', default=cur_em_id, subtext='ID эмодзи-статуса рядом с именем (оставьте пустым, если не нужен)', icon='msg_emoji')])
+            items.extend([Divider(text=section_title), Text(text=f'✨ Считать из локального Premium для {name}', subtext='Автоматически загрузить цвета и эмодзи из локального Premium', icon='msg_premium', accent=True, on_click=lambda view, a=acc_idx: self.grab_settings_from_local_premium(a, show_bulletin=True)), Text(text=f'🚀 Опубликовать профиль {name}', subtext=f'Отправить цвета и узоры для ID {uid} на сервер', icon='msg_send', accent=True, on_click=lambda view, a=acc_idx: self.push_specific_account(a, show_ui_bulletin=True)), Switch(key=f'slot_{acc_idx}_premium', text=f'Telegram Premium [{name}]', default=cur_prem, subtext=f'Отображать Premium-статус и звездочку для {name}', icon='msg_premium', on_change=lambda val: run_on_ui_thread(self._apply_all_to_all_accounts)), Selector(key=f'slot_{acc_idx}_name_color', text=f'Цвет имени и реплаев [{name}]', default=cur_name_c, items=NAME_AND_REPLY_COLORS, icon='msg_palette', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_name_bg_emoji_id', text=f'Узор имени и реплаев [{name}]', default=cur_name_bg, subtext='Document ID эмодзи-узора (оставьте пустым, если не нужен)', icon='msg_background'), Selector(key=f'slot_{acc_idx}_profile_color', text=f'Цвет обложки [{name}]', default=cur_prof_c, items=PROFILE_COLORS, icon='msg_theme', on_change=lambda idx: run_on_ui_thread(self._apply_all_to_all_accounts)), Input(key=f'slot_{acc_idx}_profile_bg_emoji_id', text=f'Узор обложки [{name}]', default=cur_prof_bg, subtext='ID эмодзи-узора (значки вокруг аватарки, оставьте пустым)', icon='msg_background'), Input(key=f'slot_{acc_idx}_emoji_status_id', text=f'Эмодзи-статус [{name}]', default=cur_em_id, subtext='ID эмодзи-статуса рядом с именем (оставьте пустым, если не нужен)', icon='msg_emoji')])
         items.extend([Divider(text='Действия'), Text(text='⭐ Активировать локальный Premium', subtext='Принудительно включить localPremium', icon='msg_premium', on_click=lambda view: (self._ensure_ayugram_premium(), bulletins.show_success('Локальный Premium активирован!'))), Text(text='🧹 Очистить локальный кэш', icon='msg_delete', red=True, on_click=self._interactive_clear_cache_dialog)])
         return items
 
