@@ -16,7 +16,7 @@
 Сервер не требует установки дополнительных библиотек и использует только стандартные модули Python (`sqlite3`, `http.server`, `json`):
 
 ```bash
-python server.py
+PORT=8000 python3 server.py
 ```
 
 ### 2. Запуск через Docker Compose
@@ -24,7 +24,12 @@ python server.py
 docker compose up -d
 ```
 
-### 3. Переменные окружения
+### 3. Автоустановка на Ubuntu / Debian с Nginx и SSL
+```bash
+sudo bash setup_server.sh your-domain.com
+```
+
+### 4. Переменные окружения
 
 | Переменная | Описание | По умолчанию |
 |---|---|---|
@@ -37,22 +42,27 @@ docker compose up -d
 
 ## 📡 REST API Спецификация
 
-### 1. `GET /health`
-Проверка состояния сервера.
+### 1. `GET /`
+Страница статуса сервиса (Service Status).
+
+### 2. `GET /health`
+Проверка состояния сервера в формате JSON.
 ```json
 {
   "status": "ok",
   "service": "SyncProfile Server",
-  "version": "1.0.0",
+  "version": "10.1.5",
   "total_profiles": 42,
   "server_time": 1740000000,
   "server_time_iso": "2026-08-20T13:50:00Z"
 }
 ```
 
-### 2. `GET /api/profile/{user_id}`
+### 3. `GET /api/profiles/updates?since={timestamp}`
+Дельта-синхронизация измененных профилей.
+
+### 4. `GET /api/profile/{user_id}`
 Получение профиля по Telegram ID.
-**Ответ:**
 ```json
 {
   "user_id": 123456789,
@@ -62,14 +72,12 @@ docker compose up -d
   "name_bg_emoji_id": 5310243482348572222,
   "profile_color": 5,
   "profile_bg_emoji_id": 5310243482348572333,
-  "custom_badge": "VIP User",
   "updated_at": 1740000000
 }
 ```
 
-### 3. `POST /api/profile`
+### 5. `POST /api/profile`
 Создание или обновление профиля.
-**Запрос:**
 ```json
 {
   "user_id": 123456789,
@@ -79,38 +87,14 @@ docker compose up -d
   "name_bg_emoji_id": 5310243482348572222,
   "profile_color": 5,
   "profile_bg_emoji_id": 5310243482348572333,
-  "custom_badge": "VIP User",
   "auth_key": "optional_key"
 }
 ```
 
-### 4. `POST /api/profiles/batch`
-Пакетный запрос нескольких профилей за один раз (используется для мгновенной загрузки участников чатов).
-**Запрос:**
+### 6. `POST /api/profiles/batch`
+Пакетный запрос нескольких профилей.
 ```json
 {
   "user_ids": [123456789, 987654321]
 }
 ```
-**Ответ:**
-```json
-{
-  "profiles": {
-    "123456789": {
-      "user_id": 123456789,
-      "premium": true,
-      "name_color": 3,
-      ...
-    }
-  }
-}
-```
-
----
-
-## 🌐 Бесплатный хостинг
-
-Вы можете развернуть сервер в один клик на популярных сервисах:
-- **Render.com**: создание Web Service -> Environment: Python -> Start Command: `python server/server.py`.
-- **Railway.app**: подключение GitHub репозитория -> автоматический деплой через Dockerfile.
-- **VPS (Ubuntu/Debian)**: запуск `systemd` сервиса или `docker compose up -d`.

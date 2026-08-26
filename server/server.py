@@ -719,1096 +719,196 @@ class StandaloneHTTPHandler(BaseHTTPRequestHandler):
 
         if path == "" or path == "/":
             stats = db.get_stats()
-            auth_user = self._get_auth_session()
-            all_profs = db.get_all_profiles()
-            dashboard_html = self._render_dashboard(stats, auth_user, all_profs)
-            self._send_html(200, dashboard_html)
+            status_html = self._render_status_page(stats)
+            self._send_html(200, status_html)
             return
 
         self._send_json(404, {"error": "Endpoint not found"})
 
-    def _render_dashboard(self, stats: Dict[str, Any], auth_user: Optional[int], all_profs: Dict[str, Dict[str, Any]]) -> str:
-        auth_badge = (
-            f'<span class="status-pill green"><span class="dot"></span> Авторизован (ID: {html.escape(str(auth_user))})</span>'
-            if auth_user
-            else f'<span class="status-pill amber"><span class="dot pulse"></span> Защита по Cookie ({html.escape(COOKIE_NAME)})</span>'
-        )
-
-        profiles_html = ""
-        if all_profs:
-            for uid_str, p in sorted(all_profs.items(), key=lambda item: item[1].get("updated_at", 0), reverse=True):
-                nc = int(p.get("name_color", 0) or 0)
-                prc = int(p.get("profile_color", 0) or 0)
-                nc_name, nc_hex = COLOR_NAMES.get(nc, (f"Цвет #{nc}", "#A855F7"))
-                prc_name, prc_hex = COLOR_NAMES.get(prc, (f"Обложка #{prc}", "#38BDF8"))
-                em_id = int(p.get("emoji_status_id", 0) or 0)
-                em_badge = f'<span class="tag emoji">⭐ Статус {em_id}</span>' if em_id else ''
-                bg_id = int(p.get("name_bg_emoji_id", 0) or 0)
-                bg_badge = f'<span class="tag pattern">✨ Узор {bg_id}</span>' if bg_id else ''
-                client_raw = str(p.get("client_type") or "AyuGram")
-                client = html.escape(client_raw, quote=True)
-                uid_clean = html.escape(str(uid_str), quote=True)
-                badge_val = html.escape(str(p.get("custom_badge") or "").strip(), quote=True)
-                badge_pill = f'<span class="custom-badge-tag" style="background: {nc_hex}22; color: {nc_hex}; border: 1px solid {nc_hex}66;">{badge_val}</span>' if badge_val else ''
-                
-                profiles_html += f"""
-                <div class="profile-card" data-uid="{uid_clean}" data-client="{client.lower()}" data-badge="{1 if badge_val else 0}" data-emoji="{1 if em_id else 0}">
-                    <div class="profile-header">
-                        <div class="profile-id-group">
-                            <div class="avatar-placeholder" style="background: linear-gradient(135deg, {nc_hex}, {prc_hex});">
-                                <span>👤</span>
-                            </div>
-                            <div>
-                                <div class="profile-id">
-                                    ID: {uid_clean}
-                                    <button class="copy-btn" onclick="copyText('{uid_clean}', this)" title="Копировать ID">📋</button>
-                                </div>
-                                <div class="profile-client">{client} • TG Premium Active</div>
-                            </div>
-                        </div>
-                        <span class="premium-star" title="Telegram Premium">⭐</span>
-                    </div>
-
-                    <div class="profile-colors">
-                        <span class="color-pill" style="border-color: {nc_hex}; color: {nc_hex};">
-                            <span class="color-circle" style="background: {nc_hex};"></span> Имя: {nc_name}
-                        </span>
-                        <span class="color-pill" style="border-color: {prc_hex}; color: {prc_hex};">
-                            <span class="color-circle" style="background: {prc_hex};"></span> Обложка: {prc_name}
-                        </span>
-                    </div>
-
-                    <div class="profile-tags">
-                        {badge_pill}
-                        {em_badge}
-                        {bg_badge}
-                    </div>
-
-                    <div class="tg-sim-wrapper">
-                        <div class="tg-sim-label">👁️ Telegram Live Preview:</div>
-                        <div class="tg-sim-bubble" style="border-left: 3px solid {nc_hex};">
-                            <div class="tg-sim-author-row">
-                                <span class="tg-sim-author" style="color: {nc_hex};">User {uid_clean}</span>
-                                {f'<span class="tg-sim-badge" style="color: {nc_hex}; border-color: {nc_hex}88;">[{badge_val}]</span>' if badge_val else ''}
-                                <span class="tg-sim-star">⭐</span>
-                            </div>
-                            <div class="tg-sim-reply" style="border-left: 2px solid {nc_hex};">
-                                <div class="tg-sim-reply-name" style="color: {nc_hex};">SyncProfile Node</div>
-                                <div class="tg-sim-reply-text">Кастомный цвет и паттерны активны ✨</div>
-                            </div>
-                            <div class="tg-sim-text">
-                                Сообщение синхронизировано
-                                {f'<span class="tg-sim-em-tag">⭐ {em_id}</span>' if em_id else ''}
-                            </div>
-                            <div class="tg-sim-meta">12:34 <span class="tg-sim-check">✓✓</span></div>
-                        </div>
-                    </div>
-                </div>
-                """
-        else:
-            profiles_html = """
-            <div class="empty-state">
-                <div class="empty-icon">📭</div>
-                <h3>База пока пуста</h3>
-                <p>Профили появятся здесь автоматически при первой публикации из клиента AyuGram.</p>
-            </div>
-            """
-
-        dashboard_html = f"""<!DOCTYPE html>
+    def _render_status_page(self, stats: Dict[str, Any]) -> str:
+        total_profs = stats.get("total_profiles", 0)
+        return f"""<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>SyncProfile Cloud Node</title>
-    <link rel="preconnect" href="https://fonts.googleapis.com">
-    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    <title>SyncProfile Service Status</title>
     <style>
         :root {{
-            --bg-base: #07090e;
-            --bg-surface: rgba(16, 23, 38, 0.75);
-            --bg-card: rgba(24, 34, 56, 0.6);
-            --border-subtle: rgba(255, 255, 255, 0.08);
-            --border-highlight: rgba(168, 85, 247, 0.3);
-            --primary: #a855f7;
-            --primary-glow: rgba(168, 85, 247, 0.4);
-            --secondary: #06b6d4;
-            --accent: #ec4899;
-            --text-main: #f8fafc;
+            --bg-color: #0b0f19;
+            --card-bg: rgba(22, 30, 49, 0.85);
+            --border-color: rgba(255, 255, 255, 0.08);
+            --text-main: #f1f5f9;
             --text-muted: #94a3b8;
-            --success: #10b981;
-            --amber: #f59e0b;
+            --accent-blue: #38bdf8;
+            --accent-green: #22c55e;
         }}
-
-        * {{
-            box-sizing: border-box;
-            margin: 0;
-            padding: 0;
-        }}
-
+        * {{ box-sizing: border-box; margin: 0; padding: 0; }}
         body {{
-            font-family: 'Outfit', -apple-system, BlinkMacSystemFont, sans-serif;
-            background-color: var(--bg-base);
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
             color: var(--text-main);
-            min-height: 100vh;
-            background-image: 
-                radial-gradient(circle at 15% 15%, rgba(168, 85, 247, 0.12) 0%, transparent 40%),
-                radial-gradient(circle at 85% 20%, rgba(6, 182, 212, 0.1) 0%, transparent 40%),
-                radial-gradient(circle at 50% 80%, rgba(236, 72, 153, 0.08) 0%, transparent 50%);
-            background-attachment: fixed;
-            overflow-x: hidden;
-            line-height: 1.5;
-        }}
-
-        .container {{
-            max-width: 1240px;
-            margin: 0 auto;
-            padding: 2.5rem 1.5rem 4rem;
-        }}
-
-        header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 1.5rem;
-            margin-bottom: 2.5rem;
-            padding-bottom: 1.5rem;
-            border-bottom: 1px solid var(--border-subtle);
-        }}
-
-        .brand {{
-            display: flex;
-            align-items: center;
-            gap: 1rem;
-        }}
-
-        .brand-icon {{
-            width: 48px;
-            height: 48px;
-            border-radius: 14px;
-            background: linear-gradient(135deg, #a855f7, #06b6d4);
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 1.5rem;
-            box-shadow: 0 0 25px var(--primary-glow);
-            animation: pulseGlow 3s ease-in-out infinite alternate;
+            min-height: 100vh;
+            padding: 24px;
+            background-image: radial-gradient(circle at 50% 0%, rgba(56, 189, 248, 0.12), transparent 50%);
         }}
-
-        @keyframes pulseGlow {{
-            0% {{ box-shadow: 0 0 15px rgba(168, 85, 247, 0.4); }}
-            100% {{ box-shadow: 0 0 30px rgba(6, 182, 212, 0.6); }}
+        .status-card {{
+            background: var(--card-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 16px;
+            padding: 36px 32px;
+            max-width: 520px;
+            width: 100%;
+            backdrop-filter: blur(12px);
+            box-shadow: 0 20px 40px rgba(0, 0, 0, 0.4);
+            text-align: center;
         }}
-
-        .brand-title {{
-            font-size: 1.75rem;
-            font-weight: 800;
-            letter-spacing: -0.5px;
-            background: linear-gradient(to right, #ffffff, #c084fc, #38bdf8);
-            -webkit-background-clip: text;
-            -webkit-text-fill-color: transparent;
-        }}
-
-        .brand-subtitle {{
-            font-size: 0.875rem;
-            color: var(--text-muted);
-            font-weight: 400;
-        }}
-
-        .header-actions {{
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }}
-
-        .status-pill {{
+        .status-badge {{
             display: inline-flex;
             align-items: center;
-            gap: 0.5rem;
-            padding: 0.45rem 0.9rem;
+            gap: 8px;
+            background: rgba(34, 197, 94, 0.12);
+            color: var(--accent-green);
+            border: 1px solid rgba(34, 197, 94, 0.3);
+            padding: 6px 14px;
             border-radius: 9999px;
-            font-size: 0.8125rem;
-            font-weight: 500;
-            background: var(--bg-surface);
-            border: 1px solid var(--border-subtle);
-            backdrop-filter: blur(8px);
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 20px;
         }}
-
-        .status-pill.green {{
-            color: #6ee7b7;
-            border-color: rgba(16, 185, 129, 0.3);
-            background: rgba(16, 185, 129, 0.1);
-        }}
-
-        .status-pill.amber {{
-            color: #fcd34d;
-            border-color: rgba(245, 158, 11, 0.3);
-            background: rgba(245, 158, 11, 0.1);
-        }}
-
-        .dot {{
+        .pulse-dot {{
             width: 8px;
             height: 8px;
             border-radius: 50%;
-            background-color: currentColor;
+            background: var(--accent-green);
+            box-shadow: 0 0 10px var(--accent-green);
+            animation: pulse 2s infinite;
         }}
-
-        .dot.pulse {{
-            animation: ping 1.5s cubic-bezier(0, 0, 0.2, 1) infinite;
+        @keyframes pulse {{
+            0%, 100% {{ opacity: 1; transform: scale(1); }}
+            50% {{ opacity: 0.4; transform: scale(0.85); }}
         }}
-
-        @keyframes ping {{
-            75%, 100% {{
-                transform: scale(2);
-                opacity: 0;
-            }}
+        h1 {{
+            font-size: 24px;
+            font-weight: 700;
+            margin-bottom: 8px;
+            color: #ffffff;
         }}
-
-        .btn {{
-            display: inline-flex;
-            align-items: center;
-            gap: 0.5rem;
-            padding: 0.55rem 1.1rem;
-            border-radius: 10px;
-            font-size: 0.875rem;
-            font-weight: 600;
-            cursor: pointer;
-            transition: all 0.2s ease;
-            text-decoration: none;
-            border: 1px solid transparent;
+        p.subtitle {{
+            font-size: 14px;
+            color: var(--text-muted);
+            margin-bottom: 28px;
         }}
-
-        .btn-primary {{
-            background: linear-gradient(135deg, #a855f7, #7c3aed);
-            color: white;
-            box-shadow: 0 4px 14px rgba(168, 85, 247, 0.35);
-        }}
-
-        .btn-primary:hover {{
-            box-shadow: 0 6px 20px rgba(168, 85, 247, 0.5);
-            transform: translateY(-1px);
-        }}
-
-        .btn-secondary {{
-            background: var(--bg-surface);
-            color: var(--text-main);
-            border: 1px solid var(--border-subtle);
-            backdrop-filter: blur(8px);
-        }}
-
-        .btn-secondary:hover {{
-            border-color: var(--border-highlight);
-            background: rgba(30, 41, 59, 0.9);
-            transform: translateY(-1px);
-        }}
-
         .stats-grid {{
             display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-            gap: 1.25rem;
-            margin-bottom: 2.5rem;
-        }}
-
-        .stat-card {{
-            background: var(--bg-surface);
-            border: 1px solid var(--border-subtle);
-            border-radius: 16px;
-            padding: 1.5rem;
-            backdrop-filter: blur(12px);
-            transition: transform 0.2s ease, border-color 0.2s ease;
-            position: relative;
-            overflow: hidden;
-        }}
-
-        .stat-card::before {{
-            content: '';
-            position: absolute;
-            top: 0;
-            left: 0;
-            right: 0;
-            height: 3px;
-            background: linear-gradient(90deg, var(--primary), var(--secondary));
-            opacity: 0.7;
-        }}
-
-        .stat-card:hover {{
-            transform: translateY(-3px);
-            border-color: var(--border-highlight);
-        }}
-
-        .stat-label {{
-            font-size: 0.8125rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            font-weight: 600;
-            margin-bottom: 0.5rem;
-            display: flex;
-            align-items: center;
-            gap: 0.4rem;
-        }}
-
-        .stat-value {{
-            font-size: 2.25rem;
-            font-weight: 800;
-            letter-spacing: -1px;
-            color: #ffffff;
-            font-family: 'JetBrains Mono', monospace;
-        }}
-
-        .stat-sub {{
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            margin-top: 0.35rem;
-        }}
-
-        .nav-tabs {{
-            display: flex;
-            gap: 0.5rem;
-            border-bottom: 1px solid var(--border-subtle);
-            margin-bottom: 2rem;
-        }}
-
-        .tab-btn {{
-            padding: 0.75rem 1.25rem;
-            background: none;
-            border: none;
-            color: var(--text-muted);
-            font-size: 0.9375rem;
-            font-weight: 600;
-            cursor: pointer;
-            position: relative;
-            transition: color 0.2s ease;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-        }}
-
-        .tab-btn:hover {{
-            color: var(--text-main);
-        }}
-
-        .tab-btn.active {{
-            color: #ffffff;
-        }}
-
-        .tab-btn.active::after {{
-            content: '';
-            position: absolute;
-            bottom: -1px;
-            left: 0;
-            right: 0;
-            height: 2px;
-            background: linear-gradient(90deg, #a855f7, #06b6d4);
-            border-radius: 2px;
-        }}
-
-        .tab-content {{
-            display: none;
-        }}
-
-        .tab-content.active {{
-            display: block;
-            animation: fadeIn 0.25s ease-out;
-        }}
-
-        @keyframes fadeIn {{
-            from {{ opacity: 0; transform: translateY(6px); }}
-            to {{ opacity: 1; transform: translateY(0); }}
-        }}
-
-        .toolbar {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            flex-wrap: wrap;
-            gap: 1rem;
-            margin-bottom: 1.5rem;
-        }}
-
-        .search-box {{
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
-            background: var(--bg-surface);
-            border: 1px solid var(--border-subtle);
-            border-radius: 12px;
-            padding: 0.6rem 1rem;
-            width: 100%;
-            max-width: 380px;
-            backdrop-filter: blur(8px);
-        }}
-
-        .search-box:focus-within {{
-            border-color: var(--border-highlight);
-            box-shadow: 0 0 15px rgba(168, 85, 247, 0.2);
-        }}
-
-        .search-box input {{
-            background: none;
-            border: none;
-            color: var(--text-main);
-            font-size: 0.875rem;
-            width: 100%;
-            outline: none;
-            font-family: inherit;
-        }}
-
-        .filter-tags {{
-            display: flex;
-            gap: 0.5rem;
-            flex-wrap: wrap;
-        }}
-
-        .filter-tag {{
-            padding: 0.35rem 0.75rem;
-            border-radius: 8px;
-            font-size: 0.75rem;
-            font-weight: 500;
-            background: var(--bg-surface);
-            border: 1px solid var(--border-subtle);
-            color: var(--text-muted);
-            cursor: pointer;
-            transition: all 0.15s ease;
-        }}
-
-        .filter-tag:hover, .filter-tag.active {{
-            background: rgba(168, 85, 247, 0.15);
-            border-color: rgba(168, 85, 247, 0.4);
-            color: #c084fc;
-        }}
-
-        .profiles-grid {{
-            display: grid;
-            grid-template-columns: repeat(auto-fill, minmax(360px, 1fr));
-            gap: 1.25rem;
-        }}
-
-        .profile-card {{
-            background: var(--bg-surface);
-            border: 1px solid var(--border-subtle);
-            border-radius: 16px;
-            padding: 1.25rem;
-            backdrop-filter: blur(12px);
-            transition: transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
-            position: relative;
-        }}
-
-        .profile-card:hover {{
-            transform: translateY(-2px);
-            border-color: rgba(168, 85, 247, 0.35);
-            box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
-        }}
-
-        .profile-header {{
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            margin-bottom: 1rem;
-        }}
-
-        .profile-id-group {{
-            display: flex;
-            align-items: center;
-            gap: 0.75rem;
-        }}
-
-        .avatar-placeholder {{
-            width: 42px;
-            height: 42px;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            font-size: 1.25rem;
-            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.3);
-        }}
-
-        .profile-id {{
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.9375rem;
-            font-weight: 700;
-            color: #ffffff;
-            display: flex;
-            align-items: center;
-            gap: 0.4rem;
-        }}
-
-        .copy-btn {{
-            background: none;
-            border: none;
-            cursor: pointer;
-            font-size: 0.8125rem;
-            opacity: 0.6;
-            transition: opacity 0.15s ease;
-            padding: 2px;
-        }}
-
-        .copy-btn:hover {{
-            opacity: 1;
-        }}
-
-        .profile-client {{
-            font-size: 0.75rem;
-            color: var(--text-muted);
-            margin-top: 0.1rem;
-        }}
-
-        .premium-star {{
-            color: #fbbf24;
-            font-size: 1.125rem;
-            animation: spinGlow 4s linear infinite;
-        }}
-
-        @keyframes spinGlow {{
-            0% {{ transform: rotate(0deg); filter: drop-shadow(0 0 2px #fbbf24); }}
-            50% {{ transform: rotate(180deg); filter: drop-shadow(0 0 6px #f59e0b); }}
-            100% {{ transform: rotate(360deg); filter: drop-shadow(0 0 2px #fbbf24); }}
-        }}
-
-        .profile-colors {{
-            display: grid;
-            grid-template-columns: 1fr 1fr;
-            gap: 0.5rem;
-            margin-bottom: 0.75rem;
-        }}
-
-        .color-pill {{
-            display: flex;
-            align-items: center;
-            gap: 0.4rem;
-            padding: 0.35rem 0.6rem;
-            border-radius: 8px;
-            font-size: 0.75rem;
-            font-weight: 600;
-            background: rgba(0, 0, 0, 0.25);
-            border: 1px solid;
-            overflow: hidden;
-            text-overflow: ellipsis;
-            white-space: nowrap;
-        }}
-
-        .color-circle {{
-            width: 10px;
-            height: 10px;
-            border-radius: 50%;
-            flex-shrink: 0;
-        }}
-
-        .profile-tags {{
-            display: flex;
-            flex-wrap: wrap;
-            gap: 0.4rem;
-            margin-bottom: 1rem;
-        }}
-
-        .tag {{
-            display: inline-flex;
-            align-items: center;
-            gap: 0.3rem;
-            padding: 0.25rem 0.55rem;
-            border-radius: 6px;
-            font-size: 0.6875rem;
-            font-weight: 500;
-            background: rgba(255, 255, 255, 0.05);
-            border: 1px solid var(--border-subtle);
-            color: var(--text-muted);
-            font-family: 'JetBrains Mono', monospace;
-        }}
-
-        .tag.emoji {{
-            color: #38bdf8;
-            border-color: rgba(56, 189, 248, 0.25);
-            background: rgba(56, 189, 248, 0.08);
-        }}
-
-        .tag.pattern {{
-            color: #c084fc;
-            border-color: rgba(192, 132, 252, 0.25);
-            background: rgba(192, 132, 252, 0.08);
-        }}
-
-        .custom-badge-tag {{
-            padding: 0.25rem 0.6rem;
-            border-radius: 6px;
-            font-size: 0.75rem;
-            font-weight: 700;
-            text-transform: uppercase;
-            letter-spacing: 0.04em;
-        }}
-
-        .tg-sim-wrapper {{
-            margin-top: 0.75rem;
-            padding-top: 0.75rem;
-            border-top: 1px solid var(--border-subtle);
-        }}
-
-        .tg-sim-label {{
-            font-size: 0.6875rem;
-            color: var(--text-muted);
-            text-transform: uppercase;
-            letter-spacing: 0.05em;
-            margin-bottom: 0.4rem;
-            font-weight: 600;
-        }}
-
-        .tg-sim-bubble {{
-            background: #182533;
-            border-radius: 10px;
-            padding: 0.65rem 0.85rem;
-            position: relative;
-            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.25);
-        }}
-
-        .tg-sim-author-row {{
-            display: flex;
-            align-items: center;
-            gap: 0.35rem;
-            margin-bottom: 0.3rem;
-        }}
-
-        .tg-sim-author {{
-            font-size: 0.8125rem;
-            font-weight: 700;
-        }}
-
-        .tg-sim-badge {{
-            font-size: 0.6875rem;
-            font-weight: 700;
-            padding: 1px 4px;
-            border-radius: 4px;
-            border: 1px solid;
-        }}
-
-        .tg-sim-star {{
-            font-size: 0.75rem;
-            color: #fbbf24;
-        }}
-
-        .tg-sim-reply {{
-            background: rgba(0, 0, 0, 0.2);
-            padding: 0.25rem 0.5rem;
-            border-radius: 4px;
-            margin-bottom: 0.35rem;
-            font-size: 0.75rem;
-        }}
-
-        .tg-sim-reply-name {{
-            font-weight: 600;
-            font-size: 0.6875rem;
-        }}
-
-        .tg-sim-reply-text {{
-            color: #8da0b3;
-            font-size: 0.6875rem;
-        }}
-
-        .tg-sim-text {{
-            font-size: 0.8125rem;
-            color: #f5f5f5;
-            display: flex;
-            align-items: center;
-            gap: 0.35rem;
-            flex-wrap: wrap;
-        }}
-
-        .tg-sim-em-tag {{
-            font-size: 0.6875rem;
-            background: rgba(56, 189, 248, 0.2);
-            color: #38bdf8;
-            padding: 1px 5px;
-            border-radius: 4px;
-        }}
-
-        .tg-sim-meta {{
-            font-size: 0.625rem;
-            color: #6c7883;
-            text-align: right;
-            margin-top: 0.15rem;
-        }}
-
-        .tg-sim-check {{
-            color: #50b4f8;
-            font-weight: bold;
-        }}
-
-        .empty-state {{
-            grid-column: 1 / -1;
-            text-align: center;
-            padding: 4rem 1.5rem;
-            background: var(--bg-surface);
-            border: 1px dashed var(--border-subtle);
-            border-radius: 16px;
-        }}
-
-        .empty-icon {{
-            font-size: 3rem;
-            margin-bottom: 1rem;
-            opacity: 0.7;
-        }}
-
-        .api-docs {{
-            background: var(--bg-surface);
-            border: 1px solid var(--border-subtle);
-            border-radius: 16px;
-            padding: 1.5rem;
-            backdrop-filter: blur(12px);
-        }}
-
-        .api-table {{
-            width: 100%;
-            border-collapse: collapse;
-            font-size: 0.875rem;
-            margin-top: 1rem;
-        }}
-
-        .api-table th {{
+            grid-template-columns: repeat(2, 1fr);
+            gap: 12px;
+            margin-bottom: 28px;
             text-align: left;
-            padding: 0.75rem 1rem;
-            background: rgba(255, 255, 255, 0.03);
-            color: var(--text-muted);
-            font-weight: 600;
-            border-bottom: 1px solid var(--border-subtle);
         }}
-
-        .api-table td {{
-            padding: 0.85rem 1rem;
-            border-bottom: 1px solid var(--border-subtle);
+        .stat-item {{
+            background: rgba(255, 255, 255, 0.03);
+            border: 1px solid var(--border-color);
+            border-radius: 12px;
+            padding: 14px;
+        }}
+        .stat-label {{
+            font-size: 12px;
+            color: var(--text-muted);
+            margin-bottom: 4px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }}
+        .stat-val {{
+            font-size: 16px;
+            font-weight: 600;
             color: var(--text-main);
         }}
-
-        .method-badge {{
-            display: inline-block;
-            padding: 0.2rem 0.5rem;
-            border-radius: 6px;
-            font-size: 0.6875rem;
-            font-weight: 700;
-            font-family: 'JetBrains Mono', monospace;
-        }}
-
-        .method-get {{
-            background: rgba(16, 185, 129, 0.15);
-            color: #34d399;
-            border: 1px solid rgba(16, 185, 129, 0.3);
-        }}
-
-        .method-post {{
-            background: rgba(59, 130, 246, 0.15);
-            color: #60a5fa;
-            border: 1px solid rgba(59, 130, 246, 0.3);
-        }}
-
-        .endpoint-code {{
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.8125rem;
-            color: #c084fc;
-        }}
-
-        .curl-box {{
-            background: rgba(0, 0, 0, 0.4);
-            border: 1px solid var(--border-subtle);
-            border-radius: 10px;
-            padding: 1rem;
-            font-family: 'JetBrains Mono', monospace;
-            font-size: 0.75rem;
-            color: #94a3b8;
-            margin-top: 0.75rem;
-            position: relative;
-            overflow-x: auto;
-            white-space: pre-wrap;
-        }}
-
-        .toast {{
-            position: fixed;
-            bottom: 2rem;
-            right: 2rem;
-            background: #1e293b;
-            color: #ffffff;
-            padding: 0.85rem 1.25rem;
+        .endpoints-box {{
+            background: rgba(0, 0, 0, 0.25);
+            border: 1px solid var(--border-color);
             border-radius: 12px;
-            font-size: 0.875rem;
-            font-weight: 500;
-            border: 1px solid var(--border-highlight);
-            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
-            transform: translateY(100px);
-            opacity: 0;
-            transition: all 0.3s cubic-bezier(0.16, 1, 0.3, 1);
-            z-index: 1000;
-            display: flex;
-            align-items: center;
-            gap: 0.5rem;
+            padding: 14px;
+            text-align: left;
+            margin-bottom: 24px;
+            font-size: 13px;
         }}
-
-        .toast.show {{
-            transform: translateY(0);
-            opacity: 1;
+        .endpoint-row {{
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+        }}
+        .endpoint-row:last-child {{ border-bottom: none; }}
+        .method {{
+            font-family: monospace;
+            font-size: 11px;
+            font-weight: bold;
+            color: var(--accent-blue);
+            background: rgba(56, 189, 248, 0.1);
+            padding: 2px 6px;
+            border-radius: 4px;
+            margin-right: 8px;
+        }}
+        .ep-path {{ font-family: monospace; color: var(--text-muted); }}
+        .footer-note {{
+            font-size: 12px;
+            color: #64748b;
         }}
     </style>
 </head>
 <body>
-    <div class="container">
-        <header>
-            <div class="brand">
-                <div class="brand-icon">🔄</div>
-                <div>
-                    <div class="brand-title">SyncProfile Node</div>
-                    <div class="brand-subtitle">High-Performance Profile Synchronization Backend</div>
-                </div>
-            </div>
-            <div class="header-actions">
-                {auth_badge}
-                <a href="/api/backup" class="btn btn-secondary" title="Скачать полный JSON бэкап">📥 Скачать бэкап</a>
-                <button class="btn btn-primary" onclick="pingHealth()">⚡ Ping Node</button>
-            </div>
-        </header>
+    <div class="status-card">
+        <div class="status-badge">
+            <span class="pulse-dot"></span> Все системы работают штатно
+        </div>
+        <h1>SyncProfile Server</h1>
+        <p class="subtitle">Служба синхронизации профилей для AyuGram и exteraGram</p>
 
         <div class="stats-grid">
-            <div class="stat-card">
-                <div class="stat-label">👥 Синхронизировано профилей</div>
-                <div class="stat-value">{stats.get("total_profiles", 0)}</div>
-                <div class="stat-sub">Записей в локальной SQLite базе</div>
+            <div class="stat-item">
+                <div class="stat-label">Состояние</div>
+                <div class="stat-val" style="color: var(--accent-green);">ONLINE (200 OK)</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">🔑 Активные сессии</div>
-                <div class="stat-value">{stats.get("active_sessions", 0)}</div>
-                <div class="stat-sub">Выдано Cookie токенов авторизации</div>
+            <div class="stat-item">
+                <div class="stat-label">Версия узла</div>
+                <div class="stat-val">v10.1.5</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">⏱️ Время сервера (UTC)</div>
-                <div class="stat-value" style="font-size: 1.4rem; padding-top: 0.4rem;">{datetime.datetime.now(datetime.timezone.utc).strftime("%H:%M:%S")}</div>
-                <div class="stat-sub">{datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d")}</div>
+            <div class="stat-item">
+                <div class="stat-label">Профилей в базе</div>
+                <div class="stat-val">{total_profs}</div>
             </div>
-            <div class="stat-card">
-                <div class="stat-label">🛡️ Протокол защиты</div>
-                <div class="stat-value" style="font-size: 1.25rem; color: #34d399; padding-top: 0.4rem;">Cookie Auth</div>
-                <div class="stat-sub">ID Spoofing Protection Active</div>
+            <div class="stat-item">
+                <div class="stat-label">Режим хранилища</div>
+                <div class="stat-val">SQLite WAL</div>
             </div>
         </div>
 
-        <div class="nav-tabs">
-            <button class="tab-btn active" onclick="switchTab('profiles', this)">
-                👤 Профили ({len(all_profs)})
-            </button>
-            <button class="tab-btn" onclick="switchTab('api', this)">
-                🔌 Документация API & Cookies
-            </button>
-            <button class="tab-btn" onclick="switchTab('client-guide', this)">
-                📱 Подключение в AyuGram
-            </button>
-        </div>
-
-        <div id="tab-profiles" class="tab-content active">
-            <div class="toolbar">
-                <div class="search-box">
-                    <span>🔍</span>
-                    <input type="text" id="searchInput" placeholder="Поиск по User ID или клиенту..." oninput="filterProfiles()">
-                </div>
-                <div class="filter-tags">
-                    <button class="filter-tag active" onclick="filterByTag('all', this)">Все</button>
-                    <button class="filter-tag" onclick="filterByTag('ayugram', this)">AyuGram</button>
-                    <button class="filter-tag" onclick="filterByTag('exteragram', this)">exteraGram</button>
-                    <button class="filter-tag" onclick="filterByTag('badge', this)">С бейджем</button>
-                    <button class="filter-tag" onclick="filterByTag('emoji', this)">С эмодзи</button>
-                </div>
+        <div class="endpoints-box">
+            <div class="endpoint-row">
+                <span><span class="method">GET</span><span class="ep-path">/health</span></span>
+                <span style="color: var(--accent-green); font-size: 12px;">Active</span>
             </div>
-
-            <div class="profiles-grid" id="profilesGrid">
-                {profiles_html}
+            <div class="endpoint-row">
+                <span><span class="method">GET</span><span class="ep-path">/api/profiles/updates</span></span>
+                <span style="color: var(--accent-green); font-size: 12px;">Active</span>
+            </div>
+            <div class="endpoint-row">
+                <span><span class="method">POST</span><span class="ep-path">/api/profile</span></span>
+                <span style="color: var(--accent-green); font-size: 12px;">Active</span>
             </div>
         </div>
 
-        <div id="tab-api" class="tab-content">
-            <div class="api-docs">
-                <h2 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 0.75rem;">🔒 Авторизация и Cookies</h2>
-                <p style="color: var(--text-muted); font-size: 0.875rem; margin-bottom: 1.5rem;">
-                    Все эндпоинты синхронизации защищены и требуют наличия Cookie <code style="color: #c084fc;">{COOKIE_NAME}</code>.
-                    Сессия создается при запросе <code style="color: #60a5fa;">POST /api/auth</code> или автоматически при первой публикации через <code style="color: #60a5fa;">POST /api/profile</code>.
-                </p>
-
-                <h3 style="font-size: 1rem; font-weight: 600; margin-bottom: 0.5rem;">Эндпоинты API</h3>
-                <table class="api-table">
-                    <thead>
-                        <tr>
-                            <th>Метод</th>
-                            <th>Эндпоинт</th>
-                            <th>Доступ</th>
-                            <th>Описание</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        <tr>
-                            <td><span class="method-badge method-get">GET</span></td>
-                            <td class="endpoint-code">/health</td>
-                            <td>Публичный</td>
-                            <td>Проверка статуса сервера, версии и времени</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-get">GET</span></td>
-                            <td class="endpoint-code">/api/profiles/all</td>
-                            <td>Cookie</td>
-                            <td>Полная выгрузка базы профилей для локальной синхронизации</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-get">GET</span></td>
-                            <td class="endpoint-code">/api/profiles/updates?since=TIMESTAMP</td>
-                            <td>Cookie</td>
-                            <td>Дельта-синхронизация (только профили, обновленные после указанного времени)</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-get">GET</span></td>
-                            <td class="endpoint-code">/api/profile/&#123;user_id&#125;</td>
-                            <td>Cookie</td>
-                            <td>Получение конкретного профиля по ID</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-get">GET</span></td>
-                            <td class="endpoint-code">/api/stats</td>
-                            <td>Cookie</td>
-                            <td>Расширенная статистика по профилям и сессиям</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-get">GET</span></td>
-                            <td class="endpoint-code">/api/backup</td>
-                            <td>Cookie</td>
-                            <td>Выгрузка полного структурированного JSON-файла бэкапа</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-post">POST</span></td>
-                            <td class="endpoint-code">/api/auth</td>
-                            <td>Мастер-ключ</td>
-                            <td>Аутентификация клиента и выдача сессионного Cookie</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-post">POST</span></td>
-                            <td class="endpoint-code">/api/profile</td>
-                            <td>Cookie / Ключ</td>
-                            <td>Публикация/обновление своего профиля (защита от ID Spoofing)</td>
-                        </tr>
-                        <tr>
-                            <td><span class="method-badge method-post">POST</span></td>
-                            <td class="endpoint-code">/api/profiles/batch</td>
-                            <td>Cookie</td>
-                            <td>Пакетный запрос до 500 профилей за один HTTP-вызов</td>
-                        </tr>
-                    </tbody>
-                </table>
-
-                <h3 style="font-size: 1rem; font-weight: 600; margin-top: 1.5rem; margin-bottom: 0.5rem;">Примеры запросов cURL</h3>
-                <div class="curl-box">
-curl -X POST https://sync.efn.mom/api/profile \\
-  -H "Content-Type: application/json" \\
-  -H "Cookie: {COOKIE_NAME}={SECRET_ACCESS_COOKIE if SECRET_ACCESS_COOKIE else 'YOUR_SESSION_TOKEN'}" \\
-  -d '{{"user_id": 123456789, "premium": true, "name_color": 4, "profile_color": 5, "custom_badge": "VIP"}}'
-                </div>
-            </div>
-        </div>
-
-        <div id="tab-client-guide" class="tab-content">
-            <div class="api-docs">
-                <h2 style="font-size: 1.25rem; font-weight: 700; margin-bottom: 0.75rem;">📱 Инструкция по настройке плагина AyuGram</h2>
-                <div style="display: flex; flex-direction: column; gap: 1rem; margin-top: 1rem;">
-                    <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); padding: 1rem; border-radius: 10px;">
-                        <h4 style="font-size: 0.9375rem; font-weight: 600; color: #c084fc; margin-bottom: 0.4rem;">1. Установка плагина</h4>
-                        <p style="font-size: 0.8125rem; color: var(--text-muted);">
-                            Откройте <strong>AyuGram &gt; Настройки &gt; Менеджер плагинов</strong> и импортируйте файл <code>sync.plugin</code> (или <code>sync_profile.plugin</code>).
-                        </p>
-                    </div>
-                    <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); padding: 1rem; border-radius: 10px;">
-                        <h4 style="font-size: 0.9375rem; font-weight: 600; color: #38bdf8; margin-bottom: 0.4rem;">2. Автоматическая синхронизация</h4>
-                        <p style="font-size: 0.8125rem; color: var(--text-muted);">
-                            Плагин автоматически связывается с сервером по безопасному протоколу, запрашивает цвета участников диалогов и моментально обновляет оформление интерфейса без перезапуска приложения.
-                        </p>
-                    </div>
-                    <div style="background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); padding: 1rem; border-radius: 10px;">
-                        <h4 style="font-size: 0.9375rem; font-weight: 600; color: #34d399; margin-bottom: 0.4rem;">3. Публикация своего профиля</h4>
-                        <p style="font-size: 0.8125rem; color: var(--text-muted);">
-                            В настройках плагина выберите цвета, узоры и бейдж для вашего аккаунта и нажмите <strong>«🚀 Опубликовать»</strong>. Все другие пользователи плагина увидят ваш кастомный профиль!
-                        </p>
-                    </div>
-                </div>
-            </div>
+        <div class="footer-note">
+            SyncProfile Node • sync.efn.mom
         </div>
     </div>
-
-    <div class="toast" id="toast">
-        <span id="toastMsg">Уведомление</span>
-    </div>
-
-    <script>
-        function switchTab(tabId, btn) {{
-            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-            document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
-            btn.classList.add('active');
-            document.getElementById('tab-' + tabId).classList.add('active');
-        }}
-
-        function showToast(msg) {{
-            const toast = document.getElementById('toast');
-            document.getElementById('toastMsg').innerText = msg;
-            toast.classList.add('show');
-            setTimeout(() => toast.classList.remove('show'), 3000);
-        }}
-
-        function copyText(text, btn) {{
-            navigator.clipboard.writeText(text).then(() => {{
-                const orig = btn.innerText;
-                btn.innerText = '✅';
-                showToast(`Скопировано: ${{text}}`);
-                setTimeout(() => btn.innerText = orig, 1500);
-            }}).catch(() => {{
-                showToast(`ID: ${{text}}`);
-            }});
-        }}
-
-        function filterProfiles() {{
-            const query = document.getElementById('searchInput').value.toLowerCase().trim();
-            const cards = document.querySelectorAll('.profile-card');
-            cards.forEach(card => {{
-                const uid = card.getAttribute('data-uid').toLowerCase();
-                const client = card.getAttribute('data-client').toLowerCase();
-                if (uid.includes(query) || client.includes(query)) {{
-                    card.style.display = 'block';
-                }} else {{
-                    card.style.display = 'none';
-                }}
-            }});
-        }}
-
-        function filterByTag(tag, btn) {{
-            document.querySelectorAll('.filter-tag').forEach(t => t.classList.remove('active'));
-            btn.classList.add('active');
-            const cards = document.querySelectorAll('.profile-card');
-            cards.forEach(card => {{
-                if (tag === 'all') {{
-                    card.style.display = 'block';
-                }} else if (tag === 'ayugram') {{
-                    card.style.display = card.getAttribute('data-client').includes('ayugram') ? 'block' : 'none';
-                }} else if (tag === 'exteragram') {{
-                    card.style.display = card.getAttribute('data-client').includes('extera') ? 'block' : 'none';
-                }} else if (tag === 'badge') {{
-                    card.style.display = card.getAttribute('data-badge') === '1' ? 'block' : 'none';
-                }} else if (tag === 'emoji') {{
-                    card.style.display = card.getAttribute('data-emoji') === '1' ? 'block' : 'none';
-                }}
-            }});
-        }}
-
-        async function pingHealth() {{
-            const start = performance.now();
-            try {{
-                const resp = await fetch('/health');
-                const data = await resp.json();
-                const latency = (performance.now() - start).toFixed(1);
-                showToast(`🟢 Сервер онлайн! Задержка: ${{latency}} ms`);
-            }} catch (e) {{
-                showToast('🔴 Ошибка подключения к серверу');
-            }}
-        }}
-    </script>
 </body>
 </html>"""
-        return dashboard_html
 
     def do_POST(self):
         if not self._check_rate_limit():

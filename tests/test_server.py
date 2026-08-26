@@ -271,28 +271,14 @@ class TestSyncProfileServerAPI(unittest.TestCase):
             urllib.request.urlopen(req_spoof)
         self.assertEqual(cm.exception.code, 403)
 
-    def test_xss_escaping_in_html(self):
-        cookie_val = f"{COOKIE_NAME}={SECRET_ACCESS_COOKIE}"
-        xss_payload = "<script>alert('pwned')</script>"
-
-        req_profile = urllib.request.Request(
-            f"{self.server_url}/api/profile",
-            data=json.dumps({
-                "user_id": 55555,
-                "client_type": xss_payload,
-            }).encode("utf-8"),
-            headers={"Content-Type": "application/json", "Cookie": cookie_val},
-            method="POST",
-        )
-        with urllib.request.urlopen(req_profile) as resp:
-            self.assertEqual(resp.status, 200)
-
+    def test_status_page_html(self):
         req_html = urllib.request.Request(f"{self.server_url}/")
         with urllib.request.urlopen(req_html) as resp:
             self.assertEqual(resp.status, 200)
             html_text = resp.read().decode("utf-8")
-            self.assertNotIn("<script>alert('pwned')</script>", html_text)
-            self.assertIn("&lt;script&gt;alert(&#x27;pwned&#x27;)&lt;/script&gt;", html_text)
+            self.assertIn("SyncProfile Server", html_text)
+            self.assertIn("ONLINE", html_text)
+            self.assertNotIn("<script>", html_text)
 
     def test_invalid_inputs(self):
         cookie_val = f"{COOKIE_NAME}={SECRET_ACCESS_COOKIE}"

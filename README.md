@@ -12,7 +12,7 @@
 - ⚙️ **Настраиваемый клиент**: в плагине `sync_profile.plugin` доступны поля ввода URL вашего сервера и секретного Cookie-токена.
 - ⚡ **Сверхбыстрая дельта-синхронизация (`?since=...`)** с поддержкой `HTTP 304 Not Modified`.
 - 🎨 **Официальная палитра цветов Telegram** для имени (0–20) и обложки (0–15).
-- 🌐 **Премиальная веб-панель управления сервером**: живой симулятор сообщений Telegram, фильтрация и экспорт бэкапов.
+- 🌐 **Страница статуса сервиса**: мониторинг состояния сервера, метрик и количества синхронизированных профилей.
 
 ---
 
@@ -25,7 +25,7 @@ SyncProfile-Selfhosted/
 ├── build_plugin.py          # Скрипт сборки плагинов
 ├── zwylib.plugin            # Зависимость ZwyLib
 ├── server/                  # Серверная часть
-│   ├── server.py            # Сервер (REST API, SQLite WAL, Web Dashboard)
+│   ├── server.py            # Сервер (REST API, SQLite WAL, Service Status)
 │   ├── Dockerfile           # Контейнеризация
 │   ├── docker-compose.yml   # Запуск через Docker Compose
 │   ├── syncprofile.service  # Systemd служба для Linux
@@ -82,14 +82,14 @@ sudo bash server/setup_server.sh your-domain.com
 
 | Метод | Эндпоинт | Описание |
 |---|---|---|
-| `GET` | `/health` | Проверка состояния сервера и метрик |
+| `GET` | `/` | Страница статуса сервиса (Service Status) |
+| `GET` | `/health` | Проверка состояния сервера в JSON |
 | `GET` | `/api/profiles/updates?since=<ts>` | Дельта-синхронизация измененных профилей |
 | `GET` | `/api/profiles/all` | Получение всей базы профилей (с ETag / 304) |
 | `GET` | `/api/profile/{user_id}` | Получение профиля по ID |
 | `POST` | `/api/profile` | Создание или обновление профиля |
 | `POST` | `/api/profiles/batch` | Пакетный запрос профилей |
 | `GET` | `/api/backup` | Экспорт базы данных в JSON |
-| `GET` | `/` | Web Dashboard с симулятором сообщений Telegram |
 
 ---
 
