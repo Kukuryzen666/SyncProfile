@@ -124,3 +124,11 @@ python -m unittest discover tests -v
 # Сборка обеих версий плагинов (sync.plugin и sync_profile.plugin)
 python build_plugin.py
 ```
+
+---
+
+## 🤝 Авторы и благодарности
+
+- **Автор проекта:** [@Kukuryzen](https://github.com/Kukuryzen666)
+- **Разработка, оптимизация и аудит:** Проект разработан и оптимизирован при участии **Antigravity AI (Google DeepMind)** в режиме парного программирования.
+
