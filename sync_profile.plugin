@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.1"
+__version__ = "10.2.3"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -92,31 +92,31 @@ ALLOW_CUSTOM_SERVER_CONFIG = True
 
 NAME_AND_REPLY_COLORS = [
     # Ряд 1: 7 однотонных цветов (0..6)
-    "0 - 🔴 Красный",
-    "1 - 🟠 Оранжевый",
-    "2 - 🟣 Фиолетовый",
-    "3 - 🟢 Зеленый",
-    "4 - 🌊 Бирюзовый",
-    "5 - 🔵 Синий",
+    "0 - 🔵 Синий",
+    "1 - 🟢 Зеленый",
+    "2 - 🟠 Оранжевый",
+    "3 - 🔴 Красный",
+    "4 - 🟣 Фиолетовый",
+    "5 - 🩵 Бирюзовый",
     "6 - 🌸 Розовый",
 
-    # Ряд 2: 7 двухцветных градиентов (7..13)
-    "7 - 🔴/🟠 Красный + Оранжевый",
-    "8 - 🟠/🟡 Оранжевый + Желтый",
-    "9 - 🟣/🌸 Фиолетовый + Розовый",
-    "10 - 🟢/🌊 Зеленый + Бирюзовый",
-    "11 - 🌊/🔵 Бирюзовый + Синий",
-    "12 - 🔵/🟣 Синий + Фиолетовый",
-    "13 - 🌸/🔴 Розовый + Красный",
+    # Ряд 2: 7 диагональных градиентов (7..13)
+    "7 - 🔵 Синий градиент",
+    "8 - 🟢 Зеленый градиент",
+    "9 - 🟠 Оранжевый градиент",
+    "10 - 🔴 Красный градиент",
+    "11 - 🟣 Фиолетовый градиент",
+    "12 - 🩵 Бирюзовый градиент",
+    "13 - 🌸 Розовый градиент",
 
-    # Ряд 3: 7 трёхцветных узоров (14..20)
-    "14 - 🔴/🟠/🟡 Красный + Оранжевый + Желтый",
-    "15 - 🟠/🟡/🟢 Оранжевый + Желтый + Зеленый",
-    "16 - 🟣/🌸/🔴 Фиолетовый + Розовый + Красный",
-    "17 - 🟢/🌊/🔵 Зеленый + Бирюзовый + Синий",
-    "18 - 🌊/🔵/🟣 Бирюзовый + Синий + Фиолетовый",
-    "19 - 🔵/🟣/🌸 Синий + Фиолетовый + Розовый",
-    "20 - 🌸/🔴/🟠 Розовый + Красный + Оранжевый",
+    # Ряд 3: 7 двухцветных узоров (14..20)
+    "14 - 🔵🔴 Сине-красный узор",
+    "15 - 🟠🟢 Оранжево-зеленый узор",
+    "16 - 🟢🔴 Зелено-красный узор",
+    "17 - 🩵🟢 Бирюзово-зеленый узор",
+    "18 - 🌊🌸 Морской-персиковый узор",
+    "19 - 🟣🟠 Фиолетово-оранжевый узор",
+    "20 - 🔵🟡 Сине-желтый узор",
 ]
 
 # В Telegram для обложки профиля ровно 16 цветов: 8 однотонных + 8 градиентных
@@ -143,6 +143,32 @@ PROFILE_COLORS = [
 ]
 
 PEER_COLOR_RGB_MAP = {
+    0: -10443270,  # 0: 🔵 Синий (#60A5FA)
+    1: -11870592,  # 1: 🟢 Зеленый (#4ADE80)
+    2: -27392,     # 2: 🟠 Оранжевый (#FF9500)
+    3: -306606,    # 3: 🔴 Красный (#FB5252)
+    4: -5745161,   # 4: 🟣 Фиолетовый (#A855F7)
+    5: -14494738,  # 5: 🩵 Бирюзовый (#22D3EE)
+    6: -757066,    # 6: 🌸 Розовый (#F472B6)
+
+    7: -10443270,  # 7: 🔵 Синий градиент
+    8: -11870592,  # 8: 🟢 Зеленый градиент
+    9: -27392,     # 9: 🟠 Оранжевый градиент
+    10: -306606,   # 10: 🔴 Красный градиент
+    11: -5745161,  # 11: 🟣 Фиолетовый градиент
+    12: -14494738, # 12: 🩵 Бирюзовый градиент
+    13: -757066,   # 13: 🌸 Розовый градиент
+
+    14: -10443270, # 14: 🔵🔴 Сине-красный узор
+    15: -27392,    # 15: 🟠🟢 Оранжево-зеленый узор
+    16: -11870592, # 16: 🟢🔴 Зелено-красный узор
+    17: -14494738, # 17: 🩵🟢 Бирюзово-зеленый узор
+    18: -14494738, # 18: 🌊🌸 Морской-персиковый узор
+    19: -5745161,  # 19: 🟣🟠 Фиолетово-оранжевый узор
+    20: -10443270, # 20: 🔵🟡 Сине-желтый узор
+}
+
+PROFILE_COLOR_RGB_MAP = {
     0: -306606,    # 0: 🔴 Красный (#FB5252)
     1: -27392,     # 1: 🟠 Оранжевый (#FF9500)
     2: -5745161,   # 2: 🟣 Фиолетовый (#A855F7)
@@ -152,20 +178,14 @@ PEER_COLOR_RGB_MAP = {
     6: -757066,    # 6: 🌸 Розовый (#F472B6)
     7: -7829368,   # 7: ⚪ Серый (#888888)
 
-    8: -27392,     # 8: 🟠 Оранжевый градиент
-    9: -5745161,   # 9: 🟣 Фиолетовый градиент
-    10: -5745161,  # 10: 🟣 Фиолетовый градиент (обложка)
+    8: -306606,    # 8: 🔴 Красный градиент
+    9: -27392,     # 9: 🟠 Оранжевый градиент
+    10: -5745161,  # 10: 🟣 Фиолетовый градиент
     11: -11870592, # 11: 🟢 Зеленый градиент
     12: -14494738, # 12: 🌊 Бирюзовый градиент
     13: -10443270, # 13: 🔵 Синий градиент
     14: -757066,   # 14: 🌸 Розовый градиент
     15: -7829368,  # 15: ⚪ Серый градиент
-
-    16: -5745161,  # 16: 🟣/🌸/🔴 Фиолетовый узор
-    17: -11870592, # 17: 🟢/🌊/🔵 Зеленый узор
-    18: -14494738, # 18: 🌊/🔵/🟣 Бирюзовый узор
-    19: -10443270, # 19: 🔵/🟣/🌸 Синий узор
-    20: -757066,   # 20: 🌸/🔴/🟠 Розовый узор
 }
 
 def _safe_int(val: Any, default: int = 0) -> int:
@@ -484,7 +504,6 @@ class Plugin(BasePlugin):
         prof_bg = _safe_int(self._get_slot_val(acc_idx, "profile_bg_emoji_id", DEFAULT_PROFILE_BG_EMOJI), 0)
         em_id = _safe_int(self._get_slot_val(acc_idx, "emoji_status_id", DEFAULT_EMOJI_STATUS_ID), 0)
         prem = bool(self._get_slot_val(acc_idx, "premium", True))
-        custom_badge = str(self._get_slot_val(acc_idx, "custom_badge", "") or "").strip()[:64]
 
         return {
             "user_id": user_id,
@@ -494,7 +513,6 @@ class Plugin(BasePlugin):
             "name_bg_emoji_id": name_bg,
             "profile_color": prof_c,
             "profile_bg_emoji_id": prof_bg,
-            "custom_badge": custom_badge,
             "client_type": "AyuGram",
             "auth_key": self.get_setting("auth_key", "").strip(),
         }
@@ -515,29 +533,14 @@ class Plugin(BasePlugin):
                 if pcs and hasattr(pcs, "getColor"):
                     pc = pcs.getColor(c)
                     if pc and hasattr(pc, "getColor1"):
-                        return int(pc.getColor1())
+                        val = int(pc.getColor1())
+                        if val != 0:
+                            return val
         except Exception:
             pass
         if is_profile:
-            if c in (7, 15):
-                return -7829368
-            if c in (2, 9, 10):
-                return -5745161
-            if c in (3, 11):
-                return -11870592
-            if c in (4, 12):
-                return -14494738
-            if c in (5, 13):
-                return -10443270
-            if c in (6, 14):
-                return -757066
-            if c in (1, 8):
-                return -27392
-            if c == 0:
-                return -306606
-        if c in PEER_COLOR_RGB_MAP:
-            return PEER_COLOR_RGB_MAP[c]
-        return PEER_COLOR_RGB_MAP.get(c % 7, -10443270)
+            return PROFILE_COLOR_RGB_MAP.get(c, PROFILE_COLOR_RGB_MAP.get(c % 8, -306606))
+        return PEER_COLOR_RGB_MAP.get(c, PEER_COLOR_RGB_MAP.get(c % 7, -10443270))
 
     def _get_peer_color_object(self, acc: int, color_id: int, is_profile: bool = False):
         try:
@@ -608,7 +611,7 @@ class Plugin(BasePlugin):
             if pc and hasattr(pc, "color"):
                 return _safe_int(pc.color, 0)
         if uid > 0:
-            return int(abs(uid) % 7)
+            return int(abs(uid) % 8)
         return 0
 
     def _resolve_emoji_id_for_user(self, user_or_uid: Any) -> int:
@@ -658,43 +661,20 @@ class Plugin(BasePlugin):
 
         return 0
 
-    def _resolve_badge_for_user(self, user_or_uid: Any) -> str:
-        if not user_or_uid:
-            return ""
-        uid = int(getattr(user_or_uid, "id", user_or_uid) or 0) if not isinstance(user_or_uid, int) else user_or_uid
-        if uid > 0:
-            prof = self.get_cached_profile(uid)
-            if prof and prof.get("custom_badge"):
-                badge_text = str(prof["custom_badge"]).strip()
-                if badge_text:
-                    return badge_text
-
-            try:
-                from org.telegram.messenger import UserConfig
-                max_accs = getattr(UserConfig, "MAX_ACCOUNT_COUNT", 4)
-                for a in range(max_accs):
-                    u_c = UserConfig.getInstance(a)
-                    if u_c and int(u_c.getClientUserId() or 0) == uid:
-                        slot_badge = str(self._get_slot_val(a, "custom_badge", "") or "").strip()
-                        if slot_badge:
-                            return slot_badge
-            except Exception:
-                pass
-        return ""
-
     def _extract_reply_uid(self, msg: Any) -> int:
         if not msg:
             return 0
         try:
             r_msg = getattr(msg, "replyMessageObject", None)
             if r_msg:
-                try:
-                    if hasattr(r_msg, "getDialogId"):
-                        d_id = int(r_msg.getDialogId() or 0)
-                        if d_id > 0:
-                            return d_id
-                except Exception:
-                    pass
+                for method_name in ("getFromId", "getSenderId"):
+                    try:
+                        if hasattr(r_msg, method_name):
+                            uid = int(getattr(r_msg, method_name)() or 0)
+                            if uid > 0:
+                                return uid
+                    except Exception:
+                        pass
                 peer = getattr(r_msg, "getFromPeer", lambda: None)()
                 if peer:
                     uid = self._extract_peer_uid(peer)
@@ -705,7 +685,27 @@ class Plugin(BasePlugin):
                     uid = self._extract_peer_uid(getattr(mo, "from_id", None))
                     if uid > 0:
                         return uid
-                    uid = self._extract_peer_uid(getattr(mo, "peer_id", None))
+                try:
+                    if hasattr(r_msg, "getDialogId"):
+                        d_id = int(r_msg.getDialogId() or 0)
+                        if d_id > 0:
+                            return d_id
+                except Exception:
+                    pass
+
+            mo = getattr(msg, "messageOwner", None)
+            if mo and hasattr(mo, "reply_to") and mo.reply_to:
+                r_to = mo.reply_to
+                r_from = getattr(r_to, "reply_from", None)
+                if r_from:
+                    uid = self._extract_peer_uid(getattr(r_from, "from_id", None))
+                    if uid > 0:
+                        return uid
+                    uid = self._extract_peer_uid(getattr(r_from, "peer_id", None))
+                    if uid > 0:
+                        return uid
+                if hasattr(r_to, "reply_to_peer_id") and r_to.reply_to_peer_id:
+                    uid = self._extract_peer_uid(r_to.reply_to_peer_id)
                     if uid > 0:
                         return uid
 
@@ -717,24 +717,13 @@ class Plugin(BasePlugin):
                 except Exception:
                     pass
 
-            mo = getattr(msg, "messageOwner", None)
-            if mo:
-                r_to = getattr(mo, "reply_to", None)
-                if r_to:
-                    uid = self._extract_peer_uid(getattr(r_to, "reply_to_peer_id", None))
-                    if uid > 0:
-                        return uid
-                    r_from = getattr(r_to, "reply_from", None)
-                    if r_from:
-                        uid = self._extract_peer_uid(getattr(r_from, "from_id", None))
-                        if uid > 0:
-                            return uid
-                        uid = self._extract_peer_uid(getattr(r_from, "peer_id", None))
-                        if uid > 0:
-                            return uid
-
             r_to = getattr(msg, "reply_to", None)
             if r_to:
+                r_from = getattr(r_to, "reply_from", None)
+                if r_from:
+                    uid = self._extract_peer_uid(getattr(r_from, "from_id", None))
+                    if uid > 0:
+                        return uid
                 uid = self._extract_peer_uid(getattr(r_to, "reply_to_peer_id", None))
                 if uid > 0:
                     return uid
@@ -830,7 +819,7 @@ class Plugin(BasePlugin):
                                 this_pc = getattr(param, "thisObject", None)
                                 if this_pc:
                                     c_id = getattr(this_pc, "colorId", 0)
-                                    param.setResult(plugin_self._get_vibrant_color_for_id(c_id))
+                                    param.setResult(PEER_COLOR_RGB_MAP.get(c_id, PEER_COLOR_RGB_MAP.get(c_id % 7, -10443270)))
                         except Exception:
                             pass
 
@@ -1052,30 +1041,6 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
-                class UserObjectFormatNameHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            if not plugin_self.get_setting("enable_custom_badges", True):
-                                return
-                            args = getattr(param, "args", None)
-                            user = None
-                            if args:
-                                for arg in args:
-                                    if hasattr(arg, "id"):
-                                        user = arg
-                                        break
-                                    elif isinstance(arg, int) and arg > 0:
-                                        user = arg
-                                        break
-                            if user:
-                                badge = plugin_self._resolve_badge_for_user(user)
-                                if badge:
-                                    orig = param.getResult()
-                                    if orig and isinstance(orig, str) and f"[{badge}]" not in orig:
-                                        param.setResult(f"{orig} [{badge}]")
-                        except Exception:
-                            pass
-
                 uo_methods = UserObjectClass.getDeclaredMethods()
                 for m in uo_methods:
                     try:
@@ -1108,13 +1073,8 @@ class Plugin(BasePlugin):
                             m.setAccessible(True)
                             un = self.hook_method(m, GetPeerColorForUserHook())
                             if un: self._xposed_unhooks.append(un)
-                        elif m_name in ("formatName", "getUserName"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, UserObjectFormatNameHook())
-                            if un: self._xposed_unhooks.append(un)
                     except Exception as e:
                         log(f"SyncProfile: hook UserObject method {m} error: {e}")
-
             if MessageObjectClass:
                 class MsgObjGetColorIdHook(MethodHook):
                     def after_hooked_method(self, param):
@@ -1340,30 +1300,6 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
-                class MCGetUserNameHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            if not plugin_self.get_setting("enable_custom_badges", True):
-                                return
-                            args = getattr(param, "args", None)
-                            user = None
-                            if args:
-                                for arg in args:
-                                    if hasattr(arg, "id"):
-                                        user = arg
-                                        break
-                                    elif isinstance(arg, int) and arg > 0:
-                                        user = arg
-                                        break
-                            if user:
-                                badge = plugin_self._resolve_badge_for_user(user)
-                                if badge:
-                                    orig = param.getResult()
-                                    if orig and isinstance(orig, str) and f"[{badge}]" not in orig:
-                                        param.setResult(f"{orig} [{badge}]")
-                        except Exception:
-                            pass
-
                 mc_methods = MessagesControllerClass.getDeclaredMethods()
                 for m in mc_methods:
                     try:
@@ -1383,14 +1319,8 @@ class Plugin(BasePlugin):
                             unhook = self.hook_method(m, MessagesControllerIsPremiumHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                        elif m_name in ("getUserName", "formatName", "getPeerName"):
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, MCGetUserNameHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
                     except Exception as e:
                         log(f"SyncProfile: hook MessagesController method {m} error: {e}")
-
             if MessagesStorageClass:
                 ms_methods = MessagesStorageClass.getDeclaredMethods()
                 for m in ms_methods:
@@ -1624,8 +1554,13 @@ class Plugin(BasePlugin):
 
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    profiles = data.get("profiles", [])
-                    server_ts = data.get("timestamp", int(time.time()))
+                    profiles_raw = data.get("profiles", {})
+                    # Server returns profiles as dict {uid_str: profile_dict}
+                    if isinstance(profiles_raw, dict):
+                        profiles_list = list(profiles_raw.values())
+                    else:
+                        profiles_list = profiles_raw
+                    server_ts = data.get("sync_time") or data.get("server_time") or data.get("timestamp") or int(time.time())
 
                     with self._sync_lock:
                         if force_clean:
@@ -1634,7 +1569,7 @@ class Plugin(BasePlugin):
                             self._profiles_cache = preserved
                             self._unknown_uids_seen.clear()
 
-                        for p in profiles:
+                        for p in profiles_list:
                             uid = p.get("user_id")
                             if uid:
                                 self._profiles_cache[int(uid)] = p
@@ -1645,7 +1580,7 @@ class Plugin(BasePlugin):
                     self._apply_all_to_all_accounts()
 
                     if show_bulletin:
-                        bulletins.show_success(f"База обновлена! Загружено профилей: {len(profiles)}")
+                        bulletins.show_success(f"База обновлена! Загружено профилей: {len(profiles_list)}")
                     return
 
             if show_bulletin:
@@ -1683,7 +1618,7 @@ class Plugin(BasePlugin):
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     new_cache = data.get("profiles", {})
-                    new_ts = data.get("timestamp", int(time.time()))
+                    new_ts = data.get("sync_time") or data.get("server_time") or data.get("timestamp") or int(time.time())
 
                     if new_cache:
                         with self._sync_lock:
@@ -2379,21 +2314,6 @@ class Plugin(BasePlugin):
                 bulletins.show_success(f"✨ Сохранено: {clean_val or 'Очищено'}")
         async_manager.run_task(_worker())
 
-    def _interactive_input_badge(self, acc_idx: int):
-        if not HAS_ZWYLIB:
-            return
-        async def _worker():
-            cur_val = str(self._get_slot_val(acc_idx, "custom_badge", "") or "")
-            res = await UI.StringInputDialog.show("🏷️ Кастомный бейдж", initial_text=cur_val, hint="Например: VIP, Dev, Admin, ⚡ Pro")
-            if res is not None:
-                clean_val = str(res).strip()[:64]
-                self._set_slot_val(acc_idx, "custom_badge", clean_val)
-                self._save_local_profiles_cache(force=True)
-                self._apply_all_to_all_accounts()
-                self.push_specific_account(acc_idx, show_ui_bulletin=False)
-                bulletins.show_success(f"🏷️ Бейдж сохранен: {clean_val or 'Очищен'}")
-        async_manager.run_task(_worker())
-
     def _interactive_sync_bottom_sheet(self):
         if not HAS_ZWYLIB:
             self._sync_database(show_bulletin=True, force_clean=True)
@@ -2673,14 +2593,6 @@ class Plugin(BasePlugin):
                 subtext="Отображать кастомные профили и цвета других пользователей плагина",
                 icon="msg_sync",
             ),
-            Switch(
-                key="enable_custom_badges",
-                text="Отображать кастомные бейджи",
-                default=True,
-                subtext="Показывать кастомные бейджи рядом с именами в чатах и профилях",
-                icon="msg_verified",
-                on_change=lambda val: run_on_ui_thread(self._apply_all_to_all_accounts),
-            ),
         ]
 
         if ALLOW_CUSTOM_SERVER_CONFIG:
@@ -2753,7 +2665,6 @@ class Plugin(BasePlugin):
             cur_name_bg = self._get_slot_val(acc_idx, "name_bg_emoji_id", DEFAULT_NAME_BG_EMOJI) or ""
             cur_prof_bg = self._get_slot_val(acc_idx, "profile_bg_emoji_id", DEFAULT_PROFILE_BG_EMOJI) or ""
             cur_em_id = self._get_slot_val(acc_idx, "emoji_status_id", DEFAULT_EMOJI_STATUS_ID) or ""
-            cur_badge = self._get_slot_val(acc_idx, "custom_badge", "") or ""
 
             items.extend([
                 Divider(text=section_title),
@@ -2771,14 +2682,6 @@ class Plugin(BasePlugin):
                     subtext=f"Отображать Premium-статус и звездочку для {name}",
                     icon="msg_premium",
                     on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "premium", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
-                ),
-                Input(
-                    key=f"slot_{acc_idx}_custom_badge",
-                    text=f"Кастомный бейдж [{name}]",
-                    default=cur_badge,
-                    subtext="Текст плашки рядом с ником (например: VIP, Dev, Admin, ⚡ Pro)",
-                    icon="msg_verified",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "custom_badge", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
                 ),
                 Selector(
                     key=f"slot_{acc_idx}_name_color",
