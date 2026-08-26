@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.0"
+__version__ = "10.2.1"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -91,7 +91,7 @@ COOKIE_NAME = "sync_access"
 ALLOW_CUSTOM_SERVER_CONFIG = True
 
 NAME_AND_REPLY_COLORS = [
-    # Ряд 1: Однотонные цвета (7) - Порядок строго как в официальном Telegram
+    # Ряд 1: 7 однотонных цветов (0..6)
     "0 - 🔴 Красный",
     "1 - 🟠 Оранжевый",
     "2 - 🟣 Фиолетовый",
@@ -100,7 +100,7 @@ NAME_AND_REPLY_COLORS = [
     "5 - 🔵 Синий",
     "6 - 🌸 Розовый",
 
-    # Ряд 2: Двухцветные градиенты (7)
+    # Ряд 2: 7 двухцветных градиентов (7..13)
     "7 - 🔴/🟠 Красный + Оранжевый",
     "8 - 🟠/🟡 Оранжевый + Желтый",
     "9 - 🟣/🌸 Фиолетовый + Розовый",
@@ -109,7 +109,7 @@ NAME_AND_REPLY_COLORS = [
     "12 - 🔵/🟣 Синий + Фиолетовый",
     "13 - 🌸/🔴 Розовый + Красный",
 
-    # Ряд 3: Трехцветные градиенты (7)
+    # Ряд 3: 7 трёхцветных узоров (14..20)
     "14 - 🔴/🟠/🟡 Красный + Оранжевый + Желтый",
     "15 - 🟠/🟡/🟢 Оранжевый + Желтый + Зеленый",
     "16 - 🟣/🌸/🔴 Фиолетовый + Розовый + Красный",
@@ -119,7 +119,28 @@ NAME_AND_REPLY_COLORS = [
     "20 - 🌸/🔴/🟠 Розовый + Красный + Оранжевый",
 ]
 
-PROFILE_COLORS = list(NAME_AND_REPLY_COLORS)
+# В Telegram для обложки профиля ровно 16 цветов: 8 однотонных + 8 градиентных
+PROFILE_COLORS = [
+    # Ряд 1: 8 однотонных цветов (0..7)
+    "0 - 🔴 Красный",
+    "1 - 🟠 Оранжевый",
+    "2 - 🟣 Фиолетовый",
+    "3 - 🟢 Зеленый",
+    "4 - 🌊 Бирюзовый",
+    "5 - 🔵 Синий",
+    "6 - 🌸 Розовый",
+    "7 - ⚪ Серый",
+
+    # Ряд 2: 8 диагональных градиентов (8..15)
+    "8 - 🔴 Красный градиент",
+    "9 - 🟠 Оранжевый градиент",
+    "10 - 🟣 Фиолетовый градиент",
+    "11 - 🟢 Зеленый градиент",
+    "12 - 🌊 Бирюзовый градиент",
+    "13 - 🔵 Синий градиент",
+    "14 - 🌸 Розовый градиент",
+    "15 - ⚪ Серый градиент",
+]
 
 PEER_COLOR_RGB_MAP = {
     0: -306606,    # 0: 🔴 Красный (#FB5252)
@@ -129,22 +150,22 @@ PEER_COLOR_RGB_MAP = {
     4: -14494738,  # 4: 🌊 Бирюзовый (#22D3EE)
     5: -10443270,  # 5: 🔵 Синий (#60A5FA)
     6: -757066,    # 6: 🌸 Розовый (#F472B6)
+    7: -7829368,   # 7: ⚪ Серый (#888888)
 
-    7: -306606,    # 7: 🔴/🟠 Красный + Оранжевый
-    8: -27392,     # 8: 🟠/🟡 Оранжевый + Желтый
-    9: -5745161,   # 9: 🟣/🌸 Фиолетовый + Розовый
-    10: -11870592, # 10: 🟢/🌊 Зеленый + Бирюзовый
-    11: -14494738, # 11: 🌊/🔵 Бирюзовый + Синий
-    12: -10443270, # 12: 🔵/🟣 Синий + Фиолетовый
-    13: -757066,   # 13: 🌸/🔴 Розовый + Красный
+    8: -27392,     # 8: 🟠 Оранжевый градиент
+    9: -5745161,   # 9: 🟣 Фиолетовый градиент
+    10: -5745161,  # 10: 🟣 Фиолетовый градиент (обложка)
+    11: -11870592, # 11: 🟢 Зеленый градиент
+    12: -14494738, # 12: 🌊 Бирюзовый градиент
+    13: -10443270, # 13: 🔵 Синий градиент
+    14: -757066,   # 14: 🌸 Розовый градиент
+    15: -7829368,  # 15: ⚪ Серый градиент
 
-    14: -306606,   # 14: 🔴/🟠/🟡 Красный + Оранжевый + Желтый
-    15: -27392,    # 15: 🟠/🟡/🟢 Оранжевый + Желтый + Зеленый
-    16: -5745161,  # 16: 🟣/🌸/🔴 Фиолетовый + Розовый + Красный
-    17: -11870592, # 17: 🟢/🌊/🔵 Зеленый + Бирюзовый + Синий
-    18: -14494738, # 18: 🌊/🔵/🟣 Бирюзовый + Синий + Фиолетовый
-    19: -10443270, # 19: 🔵/🟣/🌸 Синий + Фиолетовый + Розовый
-    20: -757066,   # 20: 🌸/🔴/🟠 Розовый + Красный + Оранжевый
+    16: -5745161,  # 16: 🟣/🌸/🔴 Фиолетовый узор
+    17: -11870592, # 17: 🟢/🌊/🔵 Зеленый узор
+    18: -14494738, # 18: 🌊/🔵/🟣 Бирюзовый узор
+    19: -10443270, # 19: 🔵/🟣/🌸 Синий узор
+    20: -757066,   # 20: 🌸/🔴/🟠 Розовый узор
 }
 
 def _safe_int(val: Any, default: int = 0) -> int:
@@ -452,13 +473,13 @@ class Plugin(BasePlugin):
         default_prof_c = 0
 
         name_c = _safe_int(self._get_slot_val(acc_idx, "name_color", default_name_c), default_name_c)
-        if name_c < 0:
-            name_c = 0
+        if name_c < 0 or name_c >= len(NAME_AND_REPLY_COLORS):
+            name_c = default_name_c
 
         name_bg = _safe_int(self._get_slot_val(acc_idx, "name_bg_emoji_id", DEFAULT_NAME_BG_EMOJI), 0)
         prof_c = _safe_int(self._get_slot_val(acc_idx, "profile_color", default_prof_c), default_prof_c)
-        if prof_c < 0:
-            prof_c = 0
+        if prof_c < 0 or prof_c >= len(PROFILE_COLORS):
+            prof_c = default_prof_c
 
         prof_bg = _safe_int(self._get_slot_val(acc_idx, "profile_bg_emoji_id", DEFAULT_PROFILE_BG_EMOJI), 0)
         em_id = _safe_int(self._get_slot_val(acc_idx, "emoji_status_id", DEFAULT_EMOJI_STATUS_ID), 0)
@@ -484,8 +505,36 @@ class Plugin(BasePlugin):
         with self._sync_lock:
             return self._profiles_cache.get(uid)
 
-    def _get_vibrant_color_for_id(self, color_id: int) -> int:
+    def _get_vibrant_color_for_id(self, color_id: int, is_profile: bool = False) -> int:
         c = _safe_int(color_id, 0)
+        try:
+            from org.telegram.messenger import MessagesController, UserConfig
+            mc = MessagesController.getInstance(getattr(UserConfig, "selectedAccount", 0))
+            if mc:
+                pcs = mc.getProfilePeerColors() if is_profile else mc.getPeerColors()
+                if pcs and hasattr(pcs, "getColor"):
+                    pc = pcs.getColor(c)
+                    if pc and hasattr(pc, "getColor1"):
+                        return int(pc.getColor1())
+        except Exception:
+            pass
+        if is_profile:
+            if c in (7, 15):
+                return -7829368
+            if c in (2, 9, 10):
+                return -5745161
+            if c in (3, 11):
+                return -11870592
+            if c in (4, 12):
+                return -14494738
+            if c in (5, 13):
+                return -10443270
+            if c in (6, 14):
+                return -757066
+            if c in (1, 8):
+                return -27392
+            if c == 0:
+                return -306606
         if c in PEER_COLOR_RGB_MAP:
             return PEER_COLOR_RGB_MAP[c]
         return PEER_COLOR_RGB_MAP.get(c % 7, -10443270)
@@ -540,14 +589,18 @@ class Plugin(BasePlugin):
         if uid > 0:
             prof = self.get_cached_profile(uid)
             if prof and "profile_color" in prof:
-                return _safe_int(prof.get("profile_color"), 0)
+                c = _safe_int(prof.get("profile_color"), 0)
+                if 0 <= c < len(PROFILE_COLORS):
+                    return c
             try:
                 from org.telegram.messenger import UserConfig
                 max_accs = getattr(UserConfig, "MAX_ACCOUNT_COUNT", 4)
                 for a in range(max_accs):
                     u_c = UserConfig.getInstance(a)
                     if u_c and int(u_c.getClientUserId() or 0) == uid:
-                        return _safe_int(self._get_slot_val(a, "profile_color", 0), 0)
+                        c = _safe_int(self._get_slot_val(a, "profile_color", 0), 0)
+                        if 0 <= c < len(PROFILE_COLORS):
+                            return c
             except Exception:
                 pass
         if hasattr(user_or_uid, "profile_color"):
