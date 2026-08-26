@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.4"
+__version__ = "10.2.5"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -232,7 +232,6 @@ class Plugin(BasePlugin):
         self._is_running = True
         self._xposed_unhooks: List[Any] = []
         self._active_reply_rgb: int = 0
-        self._saved_active_folder_id: int = 0
         self._json_cache_file = None
 
         if HAS_ZWYLIB:
@@ -291,7 +290,9 @@ class Plugin(BasePlugin):
 
         self._register_menu_items()
         self._register_xposed_hooks()
-        self._apply_all_to_all_accounts()
+        
+        # Defer initial apply slightly so DialogsActivity can complete cold start initialization smoothly
+        threading.Timer(4.0, self._apply_all_to_all_accounts).start()
 
         if HAS_ZWYLIB:
             async_manager.run_task(self._async_initial_background_sync())
@@ -1349,67 +1350,6 @@ class Plugin(BasePlugin):
                                 self._xposed_unhooks.append(unhook)
                     except Exception as e:
                         log(f"SyncProfile: hook MessagesController method {m} error: {e}")
-            if MessagesStorageClass:
-                ms_methods = MessagesStorageClass.getDeclaredMethods()
-                for m in ms_methods:
-                    try:
-                        m_name = m.getName()
-                        if m_name == "getUser":
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, GetUserHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
-                    except Exception as e:
-                        log(f"SyncProfile: hook MessagesStorage method {m} error: {e}")
-
-            DialogsActivityClass = find_class("org.telegram.ui.DialogsActivity")
-            if DialogsActivityClass:
-                class DialogsActivityLifecycleHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            act = getattr(param, "thisObject", None)
-                            if act:
-                                for f_name in ("currentFilterId", "filterId", "selectedFilterId", "folderId"):
-                                    if hasattr(act, f_name):
-                                        val = getattr(act, f_name, 0)
-                                        if val and isinstance(val, int) and val > 0:
-                                            plugin_self._saved_active_folder_id = val
-                                            break
-                        except Exception:
-                            pass
-
-                    def after_hooked_method(self, param):
-                        try:
-                            act = getattr(param, "thisObject", None)
-                            if act:
-                                saved_fid = getattr(plugin_self, "_saved_active_folder_id", 0)
-                                if saved_fid > 0:
-                                    for f_name in ("currentFilterId", "filterId", "selectedFilterId", "folderId"):
-                                        if hasattr(act, f_name):
-                                            curr_val = getattr(act, f_name, 0)
-                                            if curr_val == 0:
-                                                setattr(act, f_name, saved_fid)
-                                                for sel_name in ("selectFolder", "selectTab", "selectDialogType"):
-                                                    if hasattr(act, sel_name):
-                                                        try:
-                                                            getattr(act, sel_name)(saved_fid)
-                                                            break
-                                                        except Exception:
-                                                            pass
-                                            break
-                        except Exception:
-                            pass
-
-                for m in DialogsActivityClass.getDeclaredMethods():
-                    try:
-                        m_name = m.getName()
-                        if m_name in ("onPause", "onResume"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, DialogsActivityLifecycleHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
-                    except Exception as e:
-                        log(f"SyncProfile: hook DialogsActivity method {m} error: {e}")
 
             log(f"SyncProfile: Установлено {len(self._xposed_unhooks)} Java хуков.")
         except Exception as e:
@@ -1438,7 +1378,7 @@ class Plugin(BasePlugin):
             if len(self._pending_user_ids) >= 15:
                 should_flush_now = True
             elif self._pending_user_ids and self._batch_timer is None:
-                self._batch_timer = threading.Timer(0.05, self._execute_batch_fetch)
+                self._batch_timer = threading.Timer(0.35, self._execute_batch_fetch)
                 self._batch_timer.daemon = True
                 self._batch_timer.start()
 
@@ -1548,16 +1488,18 @@ class Plugin(BasePlugin):
             logger.error(f"Batch fetch error: {e}")
 
     def _initial_background_sync(self):
-        time.sleep(3)
+        time.sleep(8)
         if not self._is_running:
             return
-        self._sync_database(show_bulletin=False, force_clean=True)
+        if self.get_setting("enable_sync", True):
+            self.sync_delta_updates_from_server(show_bulletin=False)
 
     async def _async_initial_background_sync(self):
-        await asyncio.sleep(3)
+        await asyncio.sleep(8)
         if not self._is_running:
             return
-        await self._async_sync_database(show_bulletin=False, force_clean=True)
+        if self.get_setting("enable_sync", True):
+            await self._async_sync_delta_updates(show_bulletin=False)
 
     def _keep_alive_sync_loop(self):
         while self._is_running:
@@ -1713,8 +1655,7 @@ class Plugin(BasePlugin):
             profile = self._profiles_cache.get(uid)
 
         if not profile:
-            self._queue_fetch_user(uid)
-            return True
+            return False
 
         try:
             from org.telegram.tgnet import TLRPC
@@ -1761,8 +1702,7 @@ class Plugin(BasePlugin):
             profile = self._profiles_cache.get(uid)
 
         if not profile:
-            self._queue_fetch_user(uid)
-            return True
+            return False
 
         try:
             nc = _safe_int(profile.get("name_color", 0))
