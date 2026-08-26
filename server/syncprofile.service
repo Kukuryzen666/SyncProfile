@@ -1,0 +1,21 @@
+[Unit]
+Description=SyncProfile Server Backend (sync.efn.mom)
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/syncprofile/server
+ExecStart=/usr/bin/python3 /opt/syncprofile/server/server.py
+Restart=always
+RestartSec=3
+
+# Переменные окружения
+Environment=PORT=8000
+Environment=HOST=127.0.0.1
+Environment=SYNC_DB_PATH=/opt/syncprofile/server/sync_profiles.db
+# Опционально: секретный ключ
+# Environment=SYNC_AUTH_KEY=your_secret_key_here
+
+[Install]
+WantedBy=multi-user.target
