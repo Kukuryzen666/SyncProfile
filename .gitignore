@@ -1,25 +1,19 @@
-# Databases
-*.db
-*.db-journal
-*.db-wal
-*.db-shm
-data/
-
-# Python
+# Databases & cache
+*.db*
 __pycache__/
 *.py[cod]
-*$py.class
-.pytest_cache/
-.coverage
-htmlcov/
 
-# Local/IDE
-.vscode/
-.idea/
-*.code-workspace
+# Selfhosted / Server files
+server/
+tests/
+sync_profile.py
+sync_profile.plugin
+build_plugin.py
 SKILL.md
 sync(Success).plugin
 
-# OS
+# OS & IDE
 .DS_Store
 Thumbs.db
+.vscode/
+.idea/

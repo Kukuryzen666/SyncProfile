@@ -281,25 +281,6 @@ class SyncProfilePlugin(BasePlugin):
         except Exception:
             pass
         try:
-            from com.kotogram.messenger import KotoConfig
-            if hasattr(KotoConfig, 'localPremium'):
-                if self.get_setting('enable_local_premium', True):
-                    KotoConfig.localPremium = True
-        except Exception:
-            pass
-        try:
-            from org.telegram.messenger import SharedConfig
-            if hasattr(SharedConfig, 'autoplayGifs'):
-                SharedConfig.autoplayGifs = True
-            if hasattr(SharedConfig, 'autoplayVideo'):
-                SharedConfig.autoplayVideo = True
-            if hasattr(SharedConfig, 'devicePerformanceClass'):
-                SharedConfig.devicePerformanceClass = 2
-            if hasattr(SharedConfig, 'saveConfig'):
-                SharedConfig.saveConfig()
-        except Exception:
-            pass
-        try:
             from org.telegram.messenger import UserConfig
             for acc in range(4):
                 try:
@@ -332,25 +313,6 @@ class SyncProfilePlugin(BasePlugin):
             from com.exteragram.messenger import ExteraConfig
             if hasattr(ExteraConfig, 'localPremium'):
                 ExteraConfig.localPremium = bool(enabled)
-        except Exception:
-            pass
-        try:
-            from com.kotogram.messenger import KotoConfig
-            if hasattr(KotoConfig, 'localPremium'):
-                KotoConfig.localPremium = bool(enabled)
-        except Exception:
-            pass
-        try:
-            from org.telegram.messenger import SharedConfig
-            if enabled:
-                if hasattr(SharedConfig, 'autoplayGifs'):
-                    SharedConfig.autoplayGifs = True
-                if hasattr(SharedConfig, 'autoplayVideo'):
-                    SharedConfig.autoplayVideo = True
-                if hasattr(SharedConfig, 'devicePerformanceClass'):
-                    SharedConfig.devicePerformanceClass = 2
-                if hasattr(SharedConfig, 'saveConfig'):
-                    SharedConfig.saveConfig()
         except Exception:
             pass
         self._apply_all_to_all_accounts()
