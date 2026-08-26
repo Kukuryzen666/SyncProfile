@@ -1,0 +1,25 @@
+# Databases
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local/IDE
+.vscode/
+.idea/
+*.code-workspace
+SKILL.md
+sync(Success).plugin
+
+# OS
+.DS_Store
+Thumbs.db

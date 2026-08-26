@@ -1,0 +1,46 @@
+name: CI - Build & Test
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  test-and-build:
+    name: Test & Build Plugins
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Run unit tests
+        run: |
+          python -m unittest discover tests -v
+
+      - name: Build plugins
+        run: |
+          python build_plugin.py
+
+      - name: Verify plugin artifacts exist
+        run: |
+          test -f sync_profile.plugin || (echo "sync_profile.plugin missing" && exit 1)
+          test -f sync.plugin || (echo "sync.plugin missing" && exit 1)
+
+      - name: Upload plugin artifacts
+        if: matrix.python-version == '3.12'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sync-profile-plugins
+          path: |
+            sync_profile.plugin
+            sync.plugin
