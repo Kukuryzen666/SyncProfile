@@ -11,6 +11,8 @@ sync_profile.plugin
 build_plugin.py
 SKILL.md
 sync(Success).plugin
+sync (SUCCESS).plugin
+sync (SUCCESS)*.plugin
 
 # OS & IDE
 .DS_Store
