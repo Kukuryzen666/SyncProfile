@@ -30,30 +30,6 @@ SECRET_ACCESS_COOKIE = os.environ.get(
 ).strip()
 MAX_REQUESTS_PER_MINUTE = int(os.environ.get("MAX_REQUESTS_PER_MINUTE", "240"))
 
-COLOR_NAMES = {
-    0: ("Синий", "#60A5FA"),
-    1: ("Зеленый", "#4ADE80"),
-    2: ("Оранжевый", "#FF9500"),
-    3: ("Красный", "#FB5252"),
-    4: ("Фиолетовый", "#A855F7"),
-    5: ("Бирюзовый", "#22D3EE"),
-    6: ("Розовый", "#F472B6"),
-    7: ("Синий диаг. / Серый", "#60A5FA"),
-    8: ("Зеленый диаг.", "#4ADE80"),
-    9: ("Оранжевый диаг.", "#FF9500"),
-    10: ("Красный диаг.", "#FB5252"),
-    11: ("Фиолетовый диаг.", "#A855F7"),
-    12: ("Бирюзовый диаг.", "#22D3EE"),
-    13: ("Розовый диаг.", "#F472B6"),
-    14: ("Сине-красный с ромбом", "#60A5FA"),
-    15: ("Оранжево-зеленый с ромбом", "#FF9500"),
-    16: ("Зелено-красный с ромбом", "#4ADE80"),
-    17: ("Бирюзово-зеленый с ромбом", "#22D3EE"),
-    18: ("Морской-персиковый с ромбом", "#22D3EE"),
-    19: ("Фиолетово-оранжевый с ромбом", "#A855F7"),
-    20: ("Сине-оранжевый с ромбом", "#60A5FA"),
-}
-
 
 class RateLimiter:
     def __init__(self, max_requests: int = MAX_REQUESTS_PER_MINUTE, window_seconds: int = 60):
@@ -144,7 +120,6 @@ class Database:
                     name_bg_emoji_id INTEGER DEFAULT 0,
                     profile_color INTEGER DEFAULT 0,
                     profile_bg_emoji_id INTEGER DEFAULT 0,
-                    custom_badge TEXT DEFAULT '',
                     client_type TEXT DEFAULT '',
                     auth_key TEXT DEFAULT '',
                     created_at INTEGER,
@@ -152,10 +127,6 @@ class Database:
                 )
                 """
             )
-            try:
-                conn.execute("ALTER TABLE profiles ADD COLUMN client_type TEXT DEFAULT ''")
-            except Exception:
-                pass
             conn.execute("CREATE INDEX IF NOT EXISTS idx_updated_at ON profiles(updated_at)")
 
             conn.execute(
@@ -223,7 +194,6 @@ class Database:
         name_bg_emoji_id = max(0, int(data.get("name_bg_emoji_id", 0) or 0))
         profile_color = min(max(0, int(data.get("profile_color", 0) or 0)), 20)
         profile_bg_emoji_id = max(0, int(data.get("profile_bg_emoji_id", 0) or 0))
-        custom_badge = str(data.get("custom_badge", "") or "").strip()[:64]
         client_type = str(data.get("client_type", "") or "").strip()[:32]
         auth_key = str(data.get("auth_key", "") or "").strip()[:128]
         now = int(time.time())
@@ -234,8 +204,8 @@ class Database:
                 """
                 INSERT INTO profiles (
                     user_id, premium, emoji_status_id, name_color, name_bg_emoji_id,
-                    profile_color, profile_bg_emoji_id, custom_badge, client_type, auth_key, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    profile_color, profile_bg_emoji_id, client_type, auth_key, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     premium = excluded.premium,
                     emoji_status_id = excluded.emoji_status_id,
@@ -243,7 +213,6 @@ class Database:
                     name_bg_emoji_id = excluded.name_bg_emoji_id,
                     profile_color = excluded.profile_color,
                     profile_bg_emoji_id = excluded.profile_bg_emoji_id,
-                    custom_badge = excluded.custom_badge,
                     client_type = excluded.client_type,
                     auth_key = CASE WHEN excluded.auth_key != '' THEN excluded.auth_key ELSE profiles.auth_key END,
                     updated_at = excluded.updated_at
@@ -256,7 +225,6 @@ class Database:
                     name_bg_emoji_id,
                     profile_color,
                     profile_bg_emoji_id,
-                    custom_badge,
                     client_type,
                     auth_key,
                     now,
@@ -271,7 +239,6 @@ class Database:
             "name_bg_emoji_id": name_bg_emoji_id,
             "profile_color": profile_color,
             "profile_bg_emoji_id": profile_bg_emoji_id,
-            "custom_badge": custom_badge,
             "client_type": client_type,
             "updated_at": now,
         }
@@ -300,7 +267,6 @@ class Database:
             "name_bg_emoji_id": row["name_bg_emoji_id"],
             "profile_color": row["profile_color"],
             "profile_bg_emoji_id": row["profile_bg_emoji_id"],
-            "custom_badge": row["custom_badge"],
             "client_type": row["client_type"] if "client_type" in row.keys() else "",
             "updated_at": row["updated_at"],
         }
@@ -336,7 +302,6 @@ class Database:
                 "name_bg_emoji_id": row["name_bg_emoji_id"],
                 "profile_color": row["profile_color"],
                 "profile_bg_emoji_id": row["profile_bg_emoji_id"],
-                "custom_badge": row["custom_badge"],
                 "client_type": row["client_type"] if "client_type" in row.keys() else "",
                 "updated_at": row["updated_at"],
             }
@@ -371,7 +336,6 @@ class Database:
                 "name_bg_emoji_id": row["name_bg_emoji_id"],
                 "profile_color": row["profile_color"],
                 "profile_bg_emoji_id": row["profile_bg_emoji_id"],
-                "custom_badge": row["custom_badge"],
                 "client_type": row["client_type"] if "client_type" in row.keys() else "",
                 "updated_at": row["updated_at"],
             }
@@ -408,7 +372,6 @@ class Database:
                 "name_bg_emoji_id": row["name_bg_emoji_id"],
                 "profile_color": row["profile_color"],
                 "profile_bg_emoji_id": row["profile_bg_emoji_id"],
-                "custom_badge": row["custom_badge"],
                 "client_type": row["client_type"] if "client_type" in row.keys() else "",
                 "updated_at": row["updated_at"],
             }
@@ -536,7 +499,7 @@ class StandaloneHTTPHandler(BaseHTTPRequestHandler):
                 {
                     "status": "ok",
                     "service": "SyncProfile Server",
-                    "version": "1.0.0",
+                    "version": "10.1.5",
                     "authenticated": auth_user is not None,
                     "cookie_required": True,
                     **stats,
@@ -665,7 +628,7 @@ class StandaloneHTTPHandler(BaseHTTPRequestHandler):
             body = json.dumps(
                 {
                     "service": "SyncProfile Backup",
-                    "version": "1.0.0",
+                    "version": "10.1.5",
                     "exported_at": int(time.time()),
                     "exported_at_iso": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     "stats": stats,

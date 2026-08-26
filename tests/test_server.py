@@ -203,7 +203,6 @@ class TestSyncProfileServerAPI(unittest.TestCase):
                 "name_bg_emoji_id": 5299025466055734222,
                 "profile_color": 20,
                 "client_type": "AyuGram",
-                "custom_badge": "Owner",
             }).encode("utf-8"),
             headers={"Content-Type": "application/json", "Cookie": cookie_val},
             method="POST",
@@ -313,7 +312,6 @@ class TestSyncProfileServerAPI(unittest.TestCase):
             data=json.dumps({
                 "user_id": 777888,
                 "name_color": 5,
-                "custom_badge": "VIP Member",
             }).encode("utf-8"),
             headers={"Content-Type": "application/json", "Cookie": cookie_val},
             method="POST",
@@ -329,7 +327,7 @@ class TestSyncProfileServerAPI(unittest.TestCase):
             self.assertEqual(resp.status, 200)
             data = json.loads(resp.read().decode("utf-8"))
             self.assertIn("777888", data["profiles"])
-            self.assertEqual(data["profiles"]["777888"]["custom_badge"], "VIP Member")
+            self.assertEqual(data["profiles"]["777888"]["name_color"], 5)
 
         future_ts = now_ts + 10000
         req_delta_future = urllib.request.Request(
