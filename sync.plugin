@@ -104,16 +104,16 @@ NAME_AND_REPLY_COLORS = [
     "7 - 🔴/🟠 Красный + Оранжевый",
     "8 - 🟠/🟡 Оранжевый + Желтый",
     "9 - 🟣/🌸 Фиолетовый + Розовый",
-    "10 - 🟢/🌊 Зеленый + Бирюзовый",
+    "10 - 🟢/🟡 Зеленый + Салатовый",
     "11 - 🌊/🔵 Бирюзовый + Синий",
     "12 - 🔵/🟣 Синий + Фиолетовый",
     "13 - 🌸/🔴 Розовый + Красный",
 
     # Ряд 3: 7 трёхцветных узоров (14..20)
     "14 - 🔴/🟠/🟡 Красный + Оранжевый + Желтый",
-    "15 - 🟠/🟡/🟢 Оранжевый + Желтый + Зеленый",
+    "15 - 🟠/🟡/🟢 Оранжевый + Желтый + Салатовый",
     "16 - 🟣/🌸/🔴 Фиолетовый + Розовый + Красный",
-    "17 - 🟢/🌊/🔵 Зеленый + Бирюзовый + Синий",
+    "17 - 🟢/🟡/🌊 Зеленый + Салатовый + Бирюзовый",
     "18 - 🌊/🔵/🟣 Бирюзовый + Синий + Фиолетовый",
     "19 - 🔵/🟣/🌸 Синий + Фиолетовый + Розовый",
     "20 - 🌸/🔴/🟠 Розовый + Красный + Оранжевый",
@@ -1624,8 +1624,13 @@ class Plugin(BasePlugin):
 
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
-                    profiles = data.get("profiles", [])
-                    server_ts = data.get("timestamp", int(time.time()))
+                    profiles_raw = data.get("profiles", {})
+                    # Server returns profiles as dict {uid_str: profile_dict}
+                    if isinstance(profiles_raw, dict):
+                        profiles_list = list(profiles_raw.values())
+                    else:
+                        profiles_list = profiles_raw
+                    server_ts = data.get("sync_time") or data.get("server_time") or data.get("timestamp") or int(time.time())
 
                     with self._sync_lock:
                         if force_clean:
@@ -1634,7 +1639,7 @@ class Plugin(BasePlugin):
                             self._profiles_cache = preserved
                             self._unknown_uids_seen.clear()
 
-                        for p in profiles:
+                        for p in profiles_list:
                             uid = p.get("user_id")
                             if uid:
                                 self._profiles_cache[int(uid)] = p
@@ -1645,7 +1650,7 @@ class Plugin(BasePlugin):
                     self._apply_all_to_all_accounts()
 
                     if show_bulletin:
-                        bulletins.show_success(f"База обновлена! Загружено профилей: {len(profiles)}")
+                        bulletins.show_success(f"База обновлена! Загружено профилей: {len(profiles_list)}")
                     return
 
             if show_bulletin:
@@ -1683,7 +1688,7 @@ class Plugin(BasePlugin):
                 if resp.status == 200:
                     data = json.loads(resp.read().decode("utf-8"))
                     new_cache = data.get("profiles", {})
-                    new_ts = data.get("timestamp", int(time.time()))
+                    new_ts = data.get("sync_time") or data.get("server_time") or data.get("timestamp") or int(time.time())
 
                     if new_cache:
                         with self._sync_lock:
