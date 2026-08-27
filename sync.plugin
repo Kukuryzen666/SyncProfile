@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.14"
+__version__ = "10.2.15"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -628,49 +628,42 @@ class Plugin(BasePlugin):
         return 0
 
     def _resolve_emoji_id_for_user(self, user_or_uid: Any) -> int:
+        """Return the emoji STATUS id (shown next to the name in dialog/chat).
+        This is emoji_status_id, NOT name_bg_emoji_id (which is the color pattern background)."""
         if not user_or_uid:
             return 0
         uid = int(getattr(user_or_uid, "id", user_or_uid) or 0) if not isinstance(user_or_uid, int) else user_or_uid
         if uid > 0:
             prof = self.get_cached_profile(uid)
-            if prof and prof.get("name_bg_emoji_id"):
-                try:
-                    val = int(prof["name_bg_emoji_id"])
-                    if val != 0:
-                        return val
-                except Exception:
-                    pass
+            if prof:
+                # Primary: use emoji_status_id from server profile
+                em_id = int(prof.get("emoji_status_id") or 0)
+                if em_id != 0:
+                    return em_id
 
+            # Fallback: check own account slot
             try:
                 from org.telegram.messenger import UserConfig
                 max_accs = getattr(UserConfig, "MAX_ACCOUNT_COUNT", 4)
                 for a in range(max_accs):
                     u_c = UserConfig.getInstance(a)
                     if u_c and int(u_c.getClientUserId() or 0) == uid:
-                        slot_bg = str(self._get_slot_val(a, "name_bg_emoji_id", "") or "").strip()
-                        if slot_bg and slot_bg.isdigit() and int(slot_bg) != 0:
-                            return int(slot_bg)
+                        slot_em = str(self._get_slot_val(a, "emoji_status_id", "") or "").strip()
+                        if slot_em and slot_em.isdigit() and int(slot_em) != 0:
+                            return int(slot_em)
             except Exception:
                 pass
 
-        if hasattr(user_or_uid, "color"):
-            c = getattr(user_or_uid, "color", None)
-            if c and hasattr(c, "background_emoji_id"):
+        # Fallback: read from the TL object's emoji_status field directly
+        if hasattr(user_or_uid, "emoji_status"):
+            es = getattr(user_or_uid, "emoji_status", None)
+            if es and hasattr(es, "document_id"):
                 try:
-                    val = int(c.background_emoji_id or 0)
+                    val = int(es.document_id or 0)
                     if val != 0:
                         return val
                 except Exception:
                     pass
-
-        try:
-            from com.radolyn.ayugram import AyuConfig
-            if hasattr(AyuConfig, "nameCustomEmojiId") and AyuConfig.nameCustomEmojiId:
-                val_str = str(AyuConfig.nameCustomEmojiId).strip()
-                if val_str and val_str.isdigit() and int(val_str) != 0:
-                    return int(val_str)
-        except Exception:
-            pass
 
         return 0
 
@@ -875,8 +868,11 @@ class Plugin(BasePlugin):
                                 uid = int(getattr(args[0], "id", 0) or 0)
                                 if uid > 0:
                                     prof = plugin_self.get_cached_profile(uid)
-                                    if prof and prof.get("name_bg_emoji_id"):
-                                        em_id = int(prof["name_bg_emoji_id"])
+                                    if prof:
+                                        # emoji_status_id is the animated emoji shown NEXT TO the name
+                                        # name_bg_emoji_id is the background pattern of the name color
+                                        # UserObject.getEmojiId() is for the name-color background, NOT the status
+                                        em_id = int(prof.get("name_bg_emoji_id") or 0)
                                         if em_id != 0:
                                             param.setResult(em_id)
                         except Exception:
@@ -1211,7 +1207,12 @@ class Plugin(BasePlugin):
                         try:
                             user_obj = param.getResult()
                             if user_obj:
-                                plugin_self._patch_user_tl_object(user_obj)
+                                uid = int(getattr(user_obj, "id", 0) or 0)
+                                patched = plugin_self._patch_user_tl_object(user_obj)
+                                # If the user is NOT in our cache yet, queue a batch fetch
+                                # so next time getUser() is called the emoji status will be there
+                                if not patched and uid > 0:
+                                    plugin_self._queue_fetch_user(uid)
                         except Exception:
                             pass
 
