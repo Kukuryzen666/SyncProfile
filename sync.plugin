@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.16"
+__version__ = "10.2.17"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -228,6 +228,9 @@ class Plugin(BasePlugin):
         self._unknown_uids_seen = set()
         self._batch_timer = None
         self._sync_lock = threading.Lock()
+        # Lock-free snapshot for hot-path reads from UI thread
+        # Updated atomically after every write to _profiles_cache
+        self._profiles_snapshot: Dict[int, Dict[str, Any]] = {}
         self._cache_dirty = False
         self._is_running = True
         self._xposed_unhooks: List[Any] = []
@@ -537,8 +540,13 @@ class Plugin(BasePlugin):
     def get_cached_profile(self, uid: int) -> Optional[Dict[str, Any]]:
         if not uid or uid <= 0:
             return None
-        with self._sync_lock:
-            return self._profiles_cache.get(uid)
+        # Fast lock-free read from snapshot (safe in CPython due to GIL)
+        return self._profiles_snapshot.get(uid)
+
+    def _update_snapshot(self):
+        """Replace the lock-free snapshot with the current cache state.
+        Must be called after every write to _profiles_cache (under lock)."""
+        self._profiles_snapshot = dict(self._profiles_cache)
 
     def _get_vibrant_color_for_id(self, color_id: int, is_profile: bool = False) -> int:
         c = _safe_int(color_id, 0)
@@ -1369,6 +1377,7 @@ class Plugin(BasePlugin):
                                     self._cache_dirty = True
                                 except ValueError:
                                     continue
+                        self._update_snapshot()
                         self._save_local_profiles_cache()
                         found_list = list(found_ids)
 
@@ -1488,6 +1497,7 @@ class Plugin(BasePlugin):
                                 self._profiles_cache[int(uid)] = p
                         self._cache_dirty = True
 
+                    self._update_snapshot()
                     self.set_setting("_last_sync_timestamp", server_ts, reload_settings=False)
                     self._save_local_profiles_cache()
                     self._apply_all_to_all_accounts()
@@ -1544,6 +1554,7 @@ class Plugin(BasePlugin):
                                     self._cache_dirty = True
                                 except ValueError:
                                     continue
+                        self._update_snapshot()
                         self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
                         self._save_local_profiles_cache()
                         updated_list = list(updated_ids)
@@ -1597,9 +1608,8 @@ class Plugin(BasePlugin):
         if uid <= 0:
             return False
 
-        profile = None
-        with self._sync_lock:
-            profile = self._profiles_cache.get(uid)
+        # Lock-free hot-path: check snapshot (atomic dict read under CPython GIL)
+        profile = self._profiles_snapshot.get(uid)
 
         if not profile:
             return False
@@ -1635,8 +1645,9 @@ class Plugin(BasePlugin):
                 st.document_id = em_id
                 u.emoji_status = st
                 f2 |= 4096 | 1
-            else:
-                u.emoji_status = None
+            # NOTE: do NOT clear emoji_status to None when em_id==0 —
+            # the user may have a real Telegram Premium emoji status
+            # that we should not overwrite with null
 
             u.flags2 = f2
             return True
@@ -1697,6 +1708,7 @@ class Plugin(BasePlugin):
                         with self._sync_lock:
                             self._profiles_cache[my_uid] = my_p
                             self._cache_dirty = True
+                self._update_snapshot()
 
                 for acc_info in active_accs:
                     acc = acc_info.get("acc_idx", 0)
@@ -1945,6 +1957,7 @@ class Plugin(BasePlugin):
                         with self._sync_lock:
                             self._profiles_cache[uid] = payload
                             self._cache_dirty = True
+                        self._update_snapshot()
                         self._save_local_profiles_cache()
                         self._apply_all_to_all_accounts()
                         if show_ui_bulletin:
@@ -2011,6 +2024,7 @@ class Plugin(BasePlugin):
                     errors.append(f"{name}: {str(e)[:30]}")
 
             if success_count > 0:
+                self._update_snapshot()
                 self._save_local_profiles_cache()
                 self._apply_all_to_all_accounts()
 
@@ -2061,6 +2075,7 @@ class Plugin(BasePlugin):
                         for uid_str, p_data in cnt.items():
                             if str(uid_str).isdigit():
                                 self._profiles_cache[int(uid_str)] = p_data
+                    self._update_snapshot()
                     return
 
             import os
@@ -2073,6 +2088,7 @@ class Plugin(BasePlugin):
                             for uid_str, p_data in data.items():
                                 if str(uid_str).isdigit():
                                     self._profiles_cache[int(uid_str)] = p_data
+                        self._update_snapshot()
                         return
 
             saved_str = self.get_setting("_local_profiles_json", "{}")
@@ -2082,6 +2098,7 @@ class Plugin(BasePlugin):
                     for uid_str, p_data in saved_dict.items():
                         if str(uid_str).isdigit():
                             self._profiles_cache[int(uid_str)] = p_data
+                self._update_snapshot()
                 self._save_local_profiles_cache(force=True)
                 self.set_setting("_local_profiles_json", "{}", reload_settings=False)
         except Exception as e:
