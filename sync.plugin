@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.6"
+__version__ = "10.2.7"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -1307,18 +1307,37 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
+                class UserConfigSetCurrentUserHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            if plugin_self.get_setting("enable_local_premium", True):
+                                args = getattr(param, "args", None)
+                                if args and len(args) > 0 and args[0] is not None:
+                                    u = args[0]
+                                    u.premium = True
+                                    u.flags = int(getattr(u, "flags", 0) | 0x10000000)
+                                    u.flags2 = int(getattr(u, "flags2", 0) | 2)
+                        except Exception:
+                            pass
+
                 uc_methods = UserConfigClass.getDeclaredMethods()
                 for m in uc_methods:
                     try:
                         m_name = m.getName()
-                        if m_name == "isPremium":
+                        p_types = m.getParameterTypes()
+                        if m_name in ("isPremium", "hasPremiumOnAccounts"):
                             m.setAccessible(True)
                             un = self.hook_method(m, UserConfigIsPremiumHook())
                             if un:
                                 self._xposed_unhooks.append(un)
-                        elif m_name == "getCurrentUser" and len(m.getParameterTypes()) == 0:
+                        elif m_name == "getCurrentUser" and len(p_types) == 0:
                             m.setAccessible(True)
                             un = self.hook_method(m, UserConfigGetCurrentUserHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                        elif m_name == "setCurrentUser" and len(p_types) >= 1:
+                            m.setAccessible(True)
+                            un = self.hook_method(m, UserConfigSetCurrentUserHook())
                             if un:
                                 self._xposed_unhooks.append(un)
                     except Exception as e:
@@ -1345,6 +1364,21 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
+                class MessagesControllerPutUserHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            if plugin_self.get_setting("enable_local_premium", True):
+                                args = getattr(param, "args", None)
+                                if args and len(args) > 0 and args[0] is not None:
+                                    u = args[0]
+                                    uid = int(getattr(u, "id", 0) or 0)
+                                    if uid > 0 and uid in plugin_self._get_my_active_uids():
+                                        u.premium = True
+                                        u.flags = int(getattr(u, "flags", 0) | 0x10000000)
+                                        u.flags2 = int(getattr(u, "flags2", 0) | 2)
+                        except Exception:
+                            pass
+
                 class MessagesControllerIsPremiumHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
@@ -1353,11 +1387,15 @@ class Plugin(BasePlugin):
                                 target = args[0]
                                 uid = int(getattr(target, "id", target) or 0) if not isinstance(target, int) else int(target)
                                 if uid > 0:
+                                    if uid in plugin_self._get_my_active_uids():
+                                        if plugin_self.get_setting("enable_local_premium", True):
+                                            param.setResult(True)
+                                            return
                                     prof = plugin_self.get_cached_profile(uid)
                                     if prof and prof.get("premium"):
                                         param.setResult(True)
                                         return
-                            if plugin_self.get_setting("enable_local_premium", True):
+                            elif plugin_self.get_setting("enable_local_premium", True):
                                 param.setResult(True)
                         except Exception:
                             pass
@@ -1366,9 +1404,24 @@ class Plugin(BasePlugin):
                     def before_hooked_method(self, param):
                         try:
                             if plugin_self.get_setting("enable_local_premium", True):
-                                args = getattr(param, "args", None)
-                                if args and len(args) > 0:
-                                    param.args[0] = True
+                                this_mc = getattr(param, "thisObject", None)
+                                if this_mc and hasattr(this_mc, "dialogFilters"):
+                                    dfs = getattr(this_mc, "dialogFilters", None)
+                                    if dfs:
+                                        count = dfs.size() if hasattr(dfs, "size") else len(dfs)
+                                        for i in range(count):
+                                            f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
+                                            if f:
+                                                f.locked = False
+                                param.setResult(None)
+                        except Exception:
+                            pass
+
+                class MessagesControllerLockFiltersHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            if plugin_self.get_setting("enable_local_premium", True):
+                                param.setResult(None)
                         except Exception:
                             pass
 
@@ -1376,6 +1429,7 @@ class Plugin(BasePlugin):
                 for m in mc_methods:
                     try:
                         m_name = m.getName()
+                        p_types = m.getParameterTypes()
                         if m_name == "getUser":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetUserHook())
@@ -1386,6 +1440,11 @@ class Plugin(BasePlugin):
                             unhook = self.hook_method(m, GetUserFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
+                        elif m_name == "putUser":
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, MessagesControllerPutUserHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
                         elif m_name in ("isUserPremium", "isPremiumUser", "hasPremium"):
                             m.setAccessible(True)
                             unhook = self.hook_method(m, MessagesControllerIsPremiumHook())
@@ -1394,6 +1453,11 @@ class Plugin(BasePlugin):
                         elif m_name == "updatePremium":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, MessagesControllerUpdatePremiumHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                        elif m_name == "lockFiltersInternal":
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, MessagesControllerLockFiltersHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
                     except Exception as e:
@@ -1740,12 +1804,20 @@ class Plugin(BasePlugin):
         if uid <= 0:
             return False
 
+        my_uids = self._get_my_active_uids()
+        is_my_acc = uid in my_uids
+
+        if is_my_acc and self.get_setting("enable_local_premium", True):
+            u.premium = True
+            u.flags = int(getattr(u, "flags", 0) | 0x10000000)
+            u.flags2 = int(getattr(u, "flags2", 0) | 2)
+
         profile = None
         with self._sync_lock:
             profile = self._profiles_cache.get(uid)
 
         if not profile:
-            return False
+            return is_my_acc
 
         try:
             from org.telegram.tgnet import TLRPC
@@ -1757,7 +1829,7 @@ class Plugin(BasePlugin):
             em_id = _safe_int(profile.get("emoji_status_id", 0))
 
             is_prem = bool(profile.get("premium", True))
-            if is_prem:
+            if is_prem or (is_my_acc and self.get_setting("enable_local_premium", True)):
                 u.premium = True
                 u.flags = int(getattr(u, "flags", 0) | 0x10000000)
 
@@ -1765,7 +1837,7 @@ class Plugin(BasePlugin):
             u.profile_color = _build_peer_color(prc, pbg)
 
             f2 = int(getattr(u, "flags2", 0) | 256 | 512)
-            if is_prem:
+            if is_prem or (is_my_acc and self.get_setting("enable_local_premium", True)):
                 f2 |= 2
 
             if em_id != 0:
@@ -1779,7 +1851,7 @@ class Plugin(BasePlugin):
             u.flags2 = f2
             return True
         except Exception:
-            return False
+            return is_my_acc
 
     def _patch_full_user_tl_object(self, fu: Any, uid: int) -> bool:
         if not fu:
