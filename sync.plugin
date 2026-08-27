@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.9"
+__version__ = "10.2.10"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -291,8 +291,8 @@ class Plugin(BasePlugin):
         self._register_menu_items()
         self._register_xposed_hooks()
         
-        # Apply cached profiles to UI smoothly once cold start is finished
-        threading.Timer(2.0, self._apply_all_to_all_accounts).start()
+        # Defer initial apply slightly so DialogsActivity can complete cold start initialization smoothly
+        threading.Timer(4.0, self._apply_all_to_all_accounts).start()
 
         if HAS_ZWYLIB:
             async_manager.run_task(self._async_initial_background_sync())
@@ -1049,23 +1049,6 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
-                class GetEmojiStatusDocumentIdHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            res = param.getResult()
-                            if res is None or res == 0:
-                                args = getattr(param, "args", None)
-                                if args and len(args) > 0 and args[0] is not None:
-                                    target = args[0]
-                                    uid = int(getattr(target, "id", 0) or 0)
-                                    if uid > 0:
-                                        em_id = plugin_self._resolve_emoji_id_for_user(uid)
-                                        if em_id != 0:
-                                            from java.lang import Long
-                                            param.setResult(Long(em_id))
-                        except Exception:
-                            pass
-
                 class GetPeerColorForUserHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
@@ -1100,15 +1083,11 @@ class Plugin(BasePlugin):
                             m.setAccessible(True)
                             un = self.hook_method(m, GetProfileColorIdHook())
                             if un: self._xposed_unhooks.append(un)
-                        elif m_name in ("getProfileEmojiId", "getOnlyProfileEmojiId"):
+                        elif m_name == "getProfileEmojiId":
                             m.setAccessible(True)
                             un = self.hook_method(m, GetProfileEmojiIdHook())
                             if un: self._xposed_unhooks.append(un)
-                        elif m_name in ("getEmojiStatusDocumentId", "getEmojiStatusId"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, GetEmojiStatusDocumentIdHook())
-                            if un: self._xposed_unhooks.append(un)
-                        elif m_name in ("hasColor", "hasEmojiStatus"):
+                        elif m_name == "hasColor":
                             m.setAccessible(True)
                             un = self.hook_method(m, HasColorHook())
                             if un: self._xposed_unhooks.append(un)
@@ -1312,11 +1291,6 @@ class Plugin(BasePlugin):
                 class UserConfigIsPremiumHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
-                            this_uc = getattr(param, "thisObject", None)
-                            if this_uc is not None:
-                                cu = getattr(this_uc, "currentUser", None)
-                                if cu is None:
-                                    return
                             if plugin_self.get_setting("enable_local_premium", True):
                                 param.setResult(True)
                         except Exception:
@@ -1333,37 +1307,18 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
-                class UserConfigSetCurrentUserHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            if plugin_self.get_setting("enable_local_premium", True):
-                                args = getattr(param, "args", None)
-                                if args and len(args) > 0 and args[0] is not None:
-                                    u = args[0]
-                                    u.premium = True
-                                    u.flags = int(getattr(u, "flags", 0) | 0x10000000)
-                                    u.flags2 = int(getattr(u, "flags2", 0) | 2)
-                        except Exception:
-                            pass
-
                 uc_methods = UserConfigClass.getDeclaredMethods()
                 for m in uc_methods:
                     try:
                         m_name = m.getName()
-                        p_types = m.getParameterTypes()
-                        if m_name in ("isPremium", "hasPremiumOnAccounts"):
+                        if m_name == "isPremium":
                             m.setAccessible(True)
                             un = self.hook_method(m, UserConfigIsPremiumHook())
                             if un:
                                 self._xposed_unhooks.append(un)
-                        elif m_name == "getCurrentUser" and len(p_types) == 0:
+                        elif m_name == "getCurrentUser" and len(m.getParameterTypes()) == 0:
                             m.setAccessible(True)
                             un = self.hook_method(m, UserConfigGetCurrentUserHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
-                        elif m_name == "setCurrentUser" and len(p_types) >= 1:
-                            m.setAccessible(True)
-                            un = self.hook_method(m, UserConfigSetCurrentUserHook())
                             if un:
                                 self._xposed_unhooks.append(un)
                     except Exception as e:
@@ -1390,27 +1345,6 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
-                class MessagesControllerPutUserHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            if plugin_self.get_setting("enable_local_premium", True):
-                                args = getattr(param, "args", None)
-                                if args and len(args) > 0 and args[0] is not None:
-                                    u = args[0]
-                                    uid = int(getattr(u, "id", 0) or 0)
-                                    if uid > 0:
-                                        this_mc = getattr(param, "thisObject", None)
-                                        if this_mc and hasattr(this_mc, "getUserConfig"):
-                                            u_cfg = this_mc.getUserConfig()
-                                            if u_cfg:
-                                                my_uid = int(getattr(u_cfg, "clientUserId", 0) or getattr(u_cfg, "getClientUserId", lambda: 0)() or 0)
-                                                if uid == my_uid:
-                                                    u.premium = True
-                                                    u.flags = int(getattr(u, "flags", 0) | 0x10000000)
-                                                    u.flags2 = int(getattr(u, "flags2", 0) | 2)
-                        except Exception:
-                            pass
-
                 class MessagesControllerIsPremiumHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
@@ -1419,20 +1353,11 @@ class Plugin(BasePlugin):
                                 target = args[0]
                                 uid = int(getattr(target, "id", target) or 0) if not isinstance(target, int) else int(target)
                                 if uid > 0:
-                                    this_mc = getattr(param, "thisObject", None)
-                                    if this_mc and hasattr(this_mc, "getUserConfig"):
-                                        u_cfg = this_mc.getUserConfig()
-                                        if u_cfg:
-                                            my_uid = int(getattr(u_cfg, "clientUserId", 0) or getattr(u_cfg, "getClientUserId", lambda: 0)() or 0)
-                                            if uid == my_uid:
-                                                if plugin_self.get_setting("enable_local_premium", True):
-                                                    param.setResult(True)
-                                                    return
                                     prof = plugin_self.get_cached_profile(uid)
                                     if prof and prof.get("premium"):
                                         param.setResult(True)
                                         return
-                            elif plugin_self.get_setting("enable_local_premium", True):
+                            if plugin_self.get_setting("enable_local_premium", True):
                                 param.setResult(True)
                         except Exception:
                             pass
@@ -1443,24 +1368,7 @@ class Plugin(BasePlugin):
                             if plugin_self.get_setting("enable_local_premium", True):
                                 args = getattr(param, "args", None)
                                 if args and len(args) > 0 and not bool(args[0]):
-                                    this_mc = getattr(param, "thisObject", None)
-                                    if this_mc and hasattr(this_mc, "dialogFilters"):
-                                        dfs = getattr(this_mc, "dialogFilters", None)
-                                        if dfs:
-                                            count = dfs.size() if hasattr(dfs, "size") else len(dfs)
-                                            for i in range(count):
-                                                f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
-                                                if f:
-                                                    f.locked = False
                                     param.setResult(None)
-                        except Exception:
-                            pass
-
-                class MessagesControllerLockFiltersHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            if plugin_self.get_setting("enable_local_premium", True):
-                                param.setResult(None)
                         except Exception:
                             pass
 
@@ -1468,7 +1376,6 @@ class Plugin(BasePlugin):
                 for m in mc_methods:
                     try:
                         m_name = m.getName()
-                        p_types = m.getParameterTypes()
                         if m_name == "getUser":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetUserHook())
@@ -1479,11 +1386,6 @@ class Plugin(BasePlugin):
                             unhook = self.hook_method(m, GetUserFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                        elif m_name == "putUser":
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, MessagesControllerPutUserHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
                         elif m_name in ("isUserPremium", "isPremiumUser", "hasPremium"):
                             m.setAccessible(True)
                             unhook = self.hook_method(m, MessagesControllerIsPremiumHook())
@@ -1492,11 +1394,6 @@ class Plugin(BasePlugin):
                         elif m_name == "updatePremium":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, MessagesControllerUpdatePremiumHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
-                        elif m_name == "lockFiltersInternal":
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, MessagesControllerLockFiltersHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
                     except Exception as e:
@@ -1526,10 +1423,10 @@ class Plugin(BasePlugin):
                     continue
                 self._pending_user_ids.add(uid)
 
-            if len(self._pending_user_ids) >= 10:
+            if len(self._pending_user_ids) >= 15:
                 should_flush_now = True
             elif self._pending_user_ids and self._batch_timer is None:
-                self._batch_timer = threading.Timer(0.15, self._execute_batch_fetch)
+                self._batch_timer = threading.Timer(0.35, self._execute_batch_fetch)
                 self._batch_timer.daemon = True
                 self._batch_timer.start()
 
@@ -1601,23 +1498,20 @@ class Plugin(BasePlugin):
                                     for u_id in found_ids:
                                         u = mc.getUser(u_id)
                                         if u:
-                                            plugin_self._patch_user_tl_object(u)
+                                            self._patch_user_tl_object(u)
                                             mc.putUser(u, True)
                                             try:
                                                 n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
                                             except Exception:
                                                 pass
-                                            try:
-                                                n_em_st = getattr(NotificationCenter, "userEmojiStatusUpdated", None)
-                                                if n_em_st is not None:
-                                                    n_c.postNotificationName(n_em_st, int(u_id))
-                                            except Exception:
-                                                pass
                                         fu = mc.getUserFull(u_id)
                                         if fu:
-                                            plugin_self._patch_full_user_tl_object(fu, u_id)
+                                            self._patch_full_user_tl_object(fu, u_id)
                                             mc.putUserFull(fu)
-
+                                            try:
+                                                n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
+                                            except Exception:
+                                                pass
                                     # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
                                     safe_mask = 1 | 2 | 4 | 524288
                                     try:
@@ -1628,12 +1522,6 @@ class Plugin(BasePlugin):
                                         n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
                                         if n_id is not None:
                                             n_c.postNotificationName(n_id)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        n_em = getattr(NotificationCenter, "emojiLoaded", None)
-                                        if n_em is not None:
-                                            n_c.postNotificationName(n_em)
                                     except Exception:
                                         pass
                             except Exception:
@@ -1648,30 +1536,18 @@ class Plugin(BasePlugin):
             logger.error(f"Batch fetch error: {e}")
 
     def _initial_background_sync(self):
-        last_ts = self.get_setting("_last_sync_timestamp", 0)
-        cache_empty = len(self._profiles_cache) == 0 or last_ts == 0
-        delay = 1.0 if cache_empty else 3.0
-        time.sleep(delay)
+        time.sleep(8)
         if not self._is_running:
             return
         if self.get_setting("enable_sync", True):
-            if cache_empty:
-                self._sync_database(show_bulletin=False, force_clean=False)
-            else:
-                self.sync_delta_updates_from_server(show_bulletin=False)
+            self.sync_delta_updates_from_server(show_bulletin=False)
 
     async def _async_initial_background_sync(self):
-        last_ts = self.get_setting("_last_sync_timestamp", 0)
-        cache_empty = len(self._profiles_cache) == 0 or last_ts == 0
-        delay = 1.0 if cache_empty else 3.0
-        await asyncio.sleep(delay)
+        await asyncio.sleep(8)
         if not self._is_running:
             return
         if self.get_setting("enable_sync", True):
-            if cache_empty:
-                await self._async_sync_database(show_bulletin=False, force_clean=False)
-            else:
-                await self._async_sync_delta_updates(show_bulletin=False)
+            await self._async_sync_delta_updates(show_bulletin=False)
 
     def _keep_alive_sync_loop(self):
         while self._is_running:
@@ -1809,23 +1685,20 @@ class Plugin(BasePlugin):
                                     for u_id in updated_ids:
                                         u = mc.getUser(u_id)
                                         if u:
-                                            plugin_self._patch_user_tl_object(u)
+                                            self._patch_user_tl_object(u)
                                             mc.putUser(u, True)
                                             try:
                                                 n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
                                             except Exception:
                                                 pass
-                                            try:
-                                                n_em_st = getattr(NotificationCenter, "userEmojiStatusUpdated", None)
-                                                if n_em_st is not None:
-                                                    n_c.postNotificationName(n_em_st, int(u_id))
-                                            except Exception:
-                                                pass
                                         fu = mc.getUserFull(u_id)
                                         if fu:
-                                            plugin_self._patch_full_user_tl_object(fu, u_id)
+                                            self._patch_full_user_tl_object(fu, u_id)
                                             mc.putUserFull(fu)
-
+                                            try:
+                                                n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
+                                            except Exception:
+                                                pass
                                     # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
                                     safe_mask = 1 | 2 | 4 | 524288
                                     try:
@@ -1836,12 +1709,6 @@ class Plugin(BasePlugin):
                                         n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
                                         if n_id is not None:
                                             n_c.postNotificationName(n_id)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        n_em = getattr(NotificationCenter, "emojiLoaded", None)
-                                        if n_em is not None:
-                                            n_c.postNotificationName(n_em)
                                     except Exception:
                                         pass
                             except Exception:
@@ -1873,20 +1740,12 @@ class Plugin(BasePlugin):
         if uid <= 0:
             return False
 
-        my_uids = self._get_my_active_uids()
-        is_my_acc = uid in my_uids
-
-        if is_my_acc and self.get_setting("enable_local_premium", True):
-            u.premium = True
-            u.flags = int(getattr(u, "flags", 0) | 0x10000000)
-            u.flags2 = int(getattr(u, "flags2", 0) | 2)
-
         profile = None
         with self._sync_lock:
             profile = self._profiles_cache.get(uid)
 
         if not profile:
-            return is_my_acc
+            return False
 
         try:
             from org.telegram.tgnet import TLRPC
@@ -1898,7 +1757,7 @@ class Plugin(BasePlugin):
             em_id = _safe_int(profile.get("emoji_status_id", 0))
 
             is_prem = bool(profile.get("premium", True))
-            if is_prem or (is_my_acc and self.get_setting("enable_local_premium", True)):
+            if is_prem:
                 u.premium = True
                 u.flags = int(getattr(u, "flags", 0) | 0x10000000)
 
@@ -1906,7 +1765,7 @@ class Plugin(BasePlugin):
             u.profile_color = _build_peer_color(prc, pbg)
 
             f2 = int(getattr(u, "flags2", 0) | 256 | 512)
-            if is_prem or (is_my_acc and self.get_setting("enable_local_premium", True)):
+            if is_prem:
                 f2 |= 2
 
             if em_id != 0:
@@ -1920,7 +1779,7 @@ class Plugin(BasePlugin):
             u.flags2 = f2
             return True
         except Exception:
-            return is_my_acc
+            return False
 
     def _patch_full_user_tl_object(self, fu: Any, uid: int) -> bool:
         if not fu:
@@ -1959,7 +1818,7 @@ class Plugin(BasePlugin):
     def _apply_all_to_all_accounts(self):
         def ui_update_task():
             try:
-                from org.telegram.messenger import NotificationCenter, UserConfig
+                from org.telegram.messenger import MessagesController, NotificationCenter, UserConfig
                 from org.telegram.tgnet import TLRPC
 
                 active_accs = self._get_active_accounts_data()
@@ -1972,20 +1831,33 @@ class Plugin(BasePlugin):
                             self._profiles_cache[my_uid] = my_p
                             self._cache_dirty = True
 
-                sel_acc = getattr(UserConfig, "selectedAccount", 0)
+                with self._sync_lock:
+                    items = list(self._profiles_cache.items())
 
-                for acc_info in active_accs:
-                    acc = acc_info.get("acc_idx", 0)
-                    my_acc_uid = acc_info.get("user_id", 0)
-                    if my_acc_uid == 0:
-                        continue
+                for acc in range(4):
                     try:
                         u_cfg = UserConfig.getInstance(acc)
                         if not u_cfg or not u_cfg.isClientActivated():
                             continue
 
+                        mc = MessagesController.getInstance(acc)
+                        if not mc:
+                            continue
+
+                        for uid, p in items:
+                            u = mc.getUser(uid)
+                            if u:
+                                self._patch_user_tl_object(u)
+                                mc.putUser(u, True)
+
+                            fu = mc.getUserFull(uid)
+                            if fu:
+                                self._patch_full_user_tl_object(fu, uid)
+                                mc.putUserFull(fu)
+
                         curr_u = u_cfg.getCurrentUser()
-                        if curr_u:
+                        my_acc_uid = int(u_cfg.getClientUserId() or (getattr(curr_u, "id", 0) if curr_u else 0))
+                        if curr_u and my_acc_uid != 0:
                             slot_p = self._get_profile_dict_for_slot(acc, my_acc_uid)
                             if slot_p.get("premium", True):
                                 curr_u.premium = True
@@ -2013,38 +1885,45 @@ class Plugin(BasePlugin):
                                 curr_u.emoji_status = None
 
                             curr_u.flags2 = f2
+                            mc.putUser(curr_u, True)
+
+                            fu_my = mc.getUserFull(my_acc_uid)
+                            if fu_my:
+                                fu_my.profile_color = _build_peer_color(prc, pbg)
+                                fu_my.flags2 = int(getattr(fu_my, "flags2", 0) | 256 | 512)
+                                if hasattr(fu_my, "flags"):
+                                    fu_my.flags = int(getattr(fu_my, "flags", 0) | 0x200)
+                                if hasattr(fu_my, "user") and fu_my.user:
+                                    self._patch_user_tl_object(fu_my.user)
+                                mc.putUserFull(fu_my)
 
                         n_c = NotificationCenter.getInstance(acc)
-                        if n_c and curr_u:
+                        if n_c:
+                            if curr_u and my_acc_uid != 0:
+                                try:
+                                    n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(my_acc_uid), curr_u)
+                                except Exception:
+                                    pass
+                                fu_my = mc.getUserFull(my_acc_uid)
+                                if fu_my:
+                                    try:
+                                        n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(my_acc_uid), fu_my)
+                                    except Exception:
+                                        pass
+
+                            # Safe update mask: 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
+                            safe_mask = 1 | 2 | 4 | 524288
                             try:
-                                n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(my_acc_uid), curr_u)
-                            except Exception:
-                                pass
-                            try:
-                                n_em_st = getattr(NotificationCenter, "userEmojiStatusUpdated", None)
-                                if n_em_st is not None:
-                                    n_c.postNotificationName(n_em_st, int(my_acc_uid))
+                                n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
                             except Exception:
                                 pass
 
-                            if acc == sel_acc:
-                                safe_mask = 1 | 2 | 4 | 524288
-                                try:
-                                    n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
-                                except Exception:
-                                    pass
-                                try:
-                                    n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
-                                    if n_id is not None:
-                                        n_c.postNotificationName(n_id)
-                                except Exception:
-                                    pass
-                                try:
-                                    n_em = getattr(NotificationCenter, "emojiLoaded", None)
-                                    if n_em is not None:
-                                        n_c.postNotificationName(n_em)
-                                except Exception:
-                                    pass
+                            try:
+                                n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
+                                if n_id is not None:
+                                    n_c.postNotificationName(n_id)
+                            except Exception:
+                                pass
 
                     except Exception as e:
                         log(f"SyncProfile: _apply_all_to_all_accounts acc {acc} error: {e}")
