@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.13"
+__version__ = "10.2.14"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -1373,23 +1373,28 @@ class Plugin(BasePlugin):
                                 except ValueError:
                                     continue
                         self._save_local_profiles_cache()
-                        
-                        def on_batch_loaded():
+                        found_list = list(found_ids)
+
+                        def on_batch_loaded(uids=found_list):
                             try:
                                 from org.telegram.messenger import MessagesController, NotificationCenter, UserConfig
                                 sel_acc = getattr(UserConfig, "selectedAccount", 0)
+                                mc = MessagesController.getInstance(sel_acc)
                                 n_c = NotificationCenter.getInstance(sel_acc)
-                                if n_c:
-                                    # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
-                                    safe_mask = 1 | 2 | 4 | 524288
+                                if mc and n_c and uids:
+                                    # Patch the in-memory user objects Telegram already has cached
+                                    for u_id in uids:
+                                        try:
+                                            u_obj = mc.getUser(u_id)
+                                            if u_obj:
+                                                plugin_self._patch_user_tl_object(u_obj)
+                                        except Exception:
+                                            pass
+                                    # Only post safe name/status update — do NOT include DIALOGS_CHANGED
+                                    # which resets the folder tab to All Chats
+                                    safe_mask = 1 | 4 | 524288  # NAME=1, STATUS=4, EMOJI_STATUS=524288
                                     try:
                                         n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
-                                        if n_id is not None:
-                                            n_c.postNotificationName(n_id)
                                     except Exception:
                                         pass
                             except Exception:
@@ -1542,23 +1547,25 @@ class Plugin(BasePlugin):
                                     continue
                         self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
                         self._save_local_profiles_cache()
+                        updated_list = list(updated_ids)
 
-                        def on_delta_applied():
+                        def on_delta_applied(uids=updated_list):
                             try:
                                 from org.telegram.messenger import MessagesController, NotificationCenter, UserConfig
                                 sel_acc = getattr(UserConfig, "selectedAccount", 0)
+                                mc = MessagesController.getInstance(sel_acc)
                                 n_c = NotificationCenter.getInstance(sel_acc)
-                                if n_c:
-                                    # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
-                                    safe_mask = 1 | 2 | 4 | 524288
+                                if mc and n_c and uids:
+                                    for u_id in uids:
+                                        try:
+                                            u_obj = mc.getUser(u_id)
+                                            if u_obj:
+                                                plugin_self._patch_user_tl_object(u_obj)
+                                        except Exception:
+                                            pass
+                                    safe_mask = 1 | 4 | 524288
                                     try:
                                         n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
-                                    except Exception:
-                                        pass
-                                    try:
-                                        n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
-                                        if n_id is not None:
-                                            n_c.postNotificationName(n_id)
                                     except Exception:
                                         pass
                             except Exception:
@@ -1735,17 +1742,44 @@ class Plugin(BasePlugin):
                         log(f"SyncProfile: _apply_all_to_all_accounts acc {acc} error: {e}")
 
                 sel_acc = getattr(UserConfig, "selectedAccount", 0)
-                n_c = NotificationCenter.getInstance(sel_acc)
-                if n_c:
-                    safe_mask = 1 | 2 | 4 | 524288
+                mc = None
+                try:
+                    from org.telegram.messenger import MessagesController
+                    mc = MessagesController.getInstance(sel_acc)
+                except Exception:
+                    pass
+
+                # Re-patch own user object in MessagesController's cache for each account
+                for acc_info2 in active_accs:
                     try:
-                        n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
+                        acc2 = acc_info2.get("acc_idx", 0)
+                        uid2 = acc_info2.get("user_id", 0)
+                        if uid2 == 0:
+                            continue
+                        mc2 = mc if acc2 == sel_acc else None
+                        try:
+                            from org.telegram.messenger import MessagesController
+                            mc2 = MessagesController.getInstance(acc2)
+                        except Exception:
+                            pass
+                        if mc2:
+                            try:
+                                u_obj2 = mc2.getUser(uid2)
+                                if u_obj2:
+                                    self._patch_user_tl_object(u_obj2)
+                            except Exception:
+                                pass
                     except Exception:
                         pass
+
+                from org.telegram.messenger import NotificationCenter
+                n_c = NotificationCenter.getInstance(sel_acc)
+                if n_c:
+                    # Safe: NAME=1, STATUS=4, EMOJI_STATUS=524288
+                    # Do NOT use AVATAR=2 or dialogs-change bits — those reset the folder tab
+                    safe_mask = 1 | 4 | 524288
                     try:
-                        n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
-                        if n_id is not None:
-                            n_c.postNotificationName(n_id)
+                        n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
                     except Exception:
                         pass
 
