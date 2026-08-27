@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.17"
+__version__ = "10.2.18"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -541,7 +541,12 @@ class Plugin(BasePlugin):
         if not uid or uid <= 0:
             return None
         # Fast lock-free read from snapshot (safe in CPython due to GIL)
-        return self._profiles_snapshot.get(uid)
+        # Fallback to live cache if snapshot hasn't been populated yet (first run)
+        snap = self._profiles_snapshot
+        if snap:
+            return snap.get(uid)
+        with self._sync_lock:
+            return self._profiles_cache.get(uid)
 
     def _update_snapshot(self):
         """Replace the lock-free snapshot with the current cache state.
@@ -1608,8 +1613,12 @@ class Plugin(BasePlugin):
         if uid <= 0:
             return False
 
-        # Lock-free hot-path: check snapshot (atomic dict read under CPython GIL)
-        profile = self._profiles_snapshot.get(uid)
+        # Lock-free hot-path: check snapshot first, fallback to live cache on first run
+        snap = self._profiles_snapshot
+        profile = snap.get(uid) if snap else None
+        if profile is None:
+            with self._sync_lock:
+                profile = self._profiles_cache.get(uid)
 
         if not profile:
             return False
@@ -1908,7 +1917,13 @@ class Plugin(BasePlugin):
         if error or not response or not self.get_setting("enable_sync", True):
             return HookResult()
 
-        self._patch_response_entities(response)
+        # Run entity patching in a background thread to NEVER block
+        # Telegram's network response processing thread
+        threading.Thread(
+            target=self._patch_response_entities,
+            args=(response,),
+            daemon=True
+        ).start()
         return HookResult()
 
     def on_updates_hook(
@@ -1917,7 +1932,12 @@ class Plugin(BasePlugin):
         if not updates or not self.get_setting("enable_sync", True):
             return HookResult()
 
-        self._patch_response_entities(updates)
+        # Background thread — never block Telegram's update processing
+        threading.Thread(
+            target=self._patch_response_entities,
+            args=(updates,),
+            daemon=True
+        ).start()
         return HookResult()
 
     def push_specific_account(self, acc_idx: int, show_ui_bulletin: bool = True):
