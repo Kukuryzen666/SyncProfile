@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.10"
+__version__ = "10.2.11"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -290,9 +290,6 @@ class Plugin(BasePlugin):
 
         self._register_menu_items()
         self._register_xposed_hooks()
-        
-        # Defer initial apply slightly so DialogsActivity can complete cold start initialization smoothly
-        threading.Timer(4.0, self._apply_all_to_all_accounts).start()
 
         if HAS_ZWYLIB:
             async_manager.run_task(self._async_initial_background_sync())
@@ -380,7 +377,6 @@ class Plugin(BasePlugin):
 
         if imported_any:
             self._save_local_profiles_cache(force=True)
-            self._apply_all_to_all_accounts()
 
     def _get_my_active_uids(self) -> List[int]:
         uids = []
@@ -1492,26 +1488,8 @@ class Plugin(BasePlugin):
                             try:
                                 from org.telegram.messenger import MessagesController, NotificationCenter, UserConfig
                                 sel_acc = getattr(UserConfig, "selectedAccount", 0)
-                                mc = MessagesController.getInstance(sel_acc)
                                 n_c = NotificationCenter.getInstance(sel_acc)
-                                if mc and n_c:
-                                    for u_id in found_ids:
-                                        u = mc.getUser(u_id)
-                                        if u:
-                                            self._patch_user_tl_object(u)
-                                            mc.putUser(u, True)
-                                            try:
-                                                n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
-                                            except Exception:
-                                                pass
-                                        fu = mc.getUserFull(u_id)
-                                        if fu:
-                                            self._patch_full_user_tl_object(fu, u_id)
-                                            mc.putUserFull(fu)
-                                            try:
-                                                n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
-                                            except Exception:
-                                                pass
+                                if n_c:
                                     # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
                                     safe_mask = 1 | 2 | 4 | 524288
                                     try:
@@ -1679,26 +1657,8 @@ class Plugin(BasePlugin):
                             try:
                                 from org.telegram.messenger import MessagesController, NotificationCenter, UserConfig
                                 sel_acc = getattr(UserConfig, "selectedAccount", 0)
-                                mc = MessagesController.getInstance(sel_acc)
                                 n_c = NotificationCenter.getInstance(sel_acc)
-                                if mc and n_c:
-                                    for u_id in updated_ids:
-                                        u = mc.getUser(u_id)
-                                        if u:
-                                            self._patch_user_tl_object(u)
-                                            mc.putUser(u, True)
-                                            try:
-                                                n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
-                                            except Exception:
-                                                pass
-                                        fu = mc.getUserFull(u_id)
-                                        if fu:
-                                            self._patch_full_user_tl_object(fu, u_id)
-                                            mc.putUserFull(fu)
-                                            try:
-                                                n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
-                                            except Exception:
-                                                pass
+                                if n_c:
                                     # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
                                     safe_mask = 1 | 2 | 4 | 524288
                                     try:
@@ -1818,7 +1778,7 @@ class Plugin(BasePlugin):
     def _apply_all_to_all_accounts(self):
         def ui_update_task():
             try:
-                from org.telegram.messenger import MessagesController, NotificationCenter, UserConfig
+                from org.telegram.messenger import NotificationCenter, UserConfig
                 from org.telegram.tgnet import TLRPC
 
                 active_accs = self._get_active_accounts_data()
@@ -1831,33 +1791,18 @@ class Plugin(BasePlugin):
                             self._profiles_cache[my_uid] = my_p
                             self._cache_dirty = True
 
-                with self._sync_lock:
-                    items = list(self._profiles_cache.items())
-
-                for acc in range(4):
+                for acc_info in active_accs:
+                    acc = acc_info.get("acc_idx", 0)
+                    my_acc_uid = acc_info.get("user_id", 0)
+                    if my_acc_uid == 0:
+                        continue
                     try:
                         u_cfg = UserConfig.getInstance(acc)
                         if not u_cfg or not u_cfg.isClientActivated():
                             continue
 
-                        mc = MessagesController.getInstance(acc)
-                        if not mc:
-                            continue
-
-                        for uid, p in items:
-                            u = mc.getUser(uid)
-                            if u:
-                                self._patch_user_tl_object(u)
-                                mc.putUser(u, True)
-
-                            fu = mc.getUserFull(uid)
-                            if fu:
-                                self._patch_full_user_tl_object(fu, uid)
-                                mc.putUserFull(fu)
-
                         curr_u = u_cfg.getCurrentUser()
-                        my_acc_uid = int(u_cfg.getClientUserId() or (getattr(curr_u, "id", 0) if curr_u else 0))
-                        if curr_u and my_acc_uid != 0:
+                        if curr_u:
                             slot_p = self._get_profile_dict_for_slot(acc, my_acc_uid)
                             if slot_p.get("premium", True):
                                 curr_u.premium = True
@@ -1885,48 +1830,24 @@ class Plugin(BasePlugin):
                                 curr_u.emoji_status = None
 
                             curr_u.flags2 = f2
-                            mc.putUser(curr_u, True)
-
-                            fu_my = mc.getUserFull(my_acc_uid)
-                            if fu_my:
-                                fu_my.profile_color = _build_peer_color(prc, pbg)
-                                fu_my.flags2 = int(getattr(fu_my, "flags2", 0) | 256 | 512)
-                                if hasattr(fu_my, "flags"):
-                                    fu_my.flags = int(getattr(fu_my, "flags", 0) | 0x200)
-                                if hasattr(fu_my, "user") and fu_my.user:
-                                    self._patch_user_tl_object(fu_my.user)
-                                mc.putUserFull(fu_my)
-
-                        n_c = NotificationCenter.getInstance(acc)
-                        if n_c:
-                            if curr_u and my_acc_uid != 0:
-                                try:
-                                    n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(my_acc_uid), curr_u)
-                                except Exception:
-                                    pass
-                                fu_my = mc.getUserFull(my_acc_uid)
-                                if fu_my:
-                                    try:
-                                        n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(my_acc_uid), fu_my)
-                                    except Exception:
-                                        pass
-
-                            # Safe update mask: 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
-                            safe_mask = 1 | 2 | 4 | 524288
-                            try:
-                                n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
-                            except Exception:
-                                pass
-
-                            try:
-                                n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
-                                if n_id is not None:
-                                    n_c.postNotificationName(n_id)
-                            except Exception:
-                                pass
 
                     except Exception as e:
                         log(f"SyncProfile: _apply_all_to_all_accounts acc {acc} error: {e}")
+
+                sel_acc = getattr(UserConfig, "selectedAccount", 0)
+                n_c = NotificationCenter.getInstance(sel_acc)
+                if n_c:
+                    safe_mask = 1 | 2 | 4 | 524288
+                    try:
+                        n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
+                    except Exception:
+                        pass
+                    try:
+                        n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
+                        if n_id is not None:
+                            n_c.postNotificationName(n_id)
+                    except Exception:
+                        pass
 
             except Exception as e:
                 log(f"SyncProfile: _apply_all_to_all_accounts error: {e}")
