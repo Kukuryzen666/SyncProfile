@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.11"
+__version__ = "10.2.12"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -1287,8 +1287,10 @@ class Plugin(BasePlugin):
                 class UserConfigIsPremiumHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
-                            if plugin_self.get_setting("enable_local_premium", True):
-                                param.setResult(True)
+                            this_uc = getattr(param, "thisObject", None)
+                            if this_uc and getattr(this_uc, "currentUser", None) is not None:
+                                if plugin_self.get_setting("enable_local_premium", True):
+                                    param.setResult(True)
                         except Exception:
                             pass
 
@@ -1353,8 +1355,13 @@ class Plugin(BasePlugin):
                                     if prof and prof.get("premium"):
                                         param.setResult(True)
                                         return
-                            if plugin_self.get_setting("enable_local_premium", True):
-                                param.setResult(True)
+                                    this_mc = getattr(param, "thisObject", None)
+                                    if this_mc and hasattr(this_mc, "getUserConfig"):
+                                        u_cfg = this_mc.getUserConfig()
+                                        if u_cfg and int(u_cfg.getClientUserId() or 0) == uid:
+                                            if plugin_self.get_setting("enable_local_premium", True):
+                                                param.setResult(True)
+                                                return
                         except Exception:
                             pass
 
