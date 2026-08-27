@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.12"
+__version__ = "10.2.13"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -203,9 +203,9 @@ def _safe_int(val: Any, default: int = 0) -> int:
 
 def _build_peer_color(color_id: Any, bg_emoji_id: Any = None):
     c = _safe_int(color_id, 0)
-    if c < 0:
-        c = 0
     bg = _safe_int(bg_emoji_id, 0)
+    if c == 0 and bg == 0:
+        return None
     try:
         from org.telegram.tgnet import TLRPC
         pc = TLRPC.TL_peerColor()
@@ -598,8 +598,6 @@ class Plugin(BasePlugin):
             c = getattr(user_or_uid, "color", None)
             if c and hasattr(c, "color"):
                 return _safe_int(c.color, 0)
-        if uid > 0:
-            return int(abs(uid) % 7)
         return 0
 
     def _resolve_profile_color_id_for_user(self, user_or_uid: Any) -> int:
@@ -627,8 +625,6 @@ class Plugin(BasePlugin):
             pc = getattr(user_or_uid, "profile_color", None)
             if pc and hasattr(pc, "color"):
                 return _safe_int(pc.color, 0)
-        if uid > 0:
-            return int(abs(uid) % 8)
         return 0
 
     def _resolve_emoji_id_for_user(self, user_or_uid: Any) -> int:
@@ -794,39 +790,8 @@ class Plugin(BasePlugin):
             UserObjectClass = find_class("org.telegram.messenger.UserObject")
             UserConfigClass = find_class("org.telegram.messenger.UserConfig")
             MessageObjectClass = find_class("org.telegram.messenger.MessageObject")
-            ChatMessageCellClass = find_class("org.telegram.ui.Cells.ChatMessageCell")
-            ThemeClass = find_class("org.telegram.ui.ActionBar.Theme")
 
             plugin_self = self
-
-            if ThemeClass:
-                class ThemeGetColorHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            if plugin_self._active_reply_rgb != 0:
-                                args = getattr(param, "args", None)
-                                if args and len(args) > 0 and isinstance(args[0], str):
-                                    key = args[0]
-                                    if key in (
-                                        "chat_replyLine",
-                                        "chat_replyNameText",
-                                        "chat_outReplyLine",
-                                        "chat_outReplyNameText",
-                                        "chat_inReplyLine",
-                                        "chat_inReplyNameText",
-                                    ):
-                                        param.setResult(plugin_self._active_reply_rgb)
-                        except Exception:
-                            pass
-
-                for m in ThemeClass.getDeclaredMethods():
-                    try:
-                        if m.getName() == "getColor":
-                            m.setAccessible(True)
-                            un = self.hook_method(m, ThemeGetColorHook())
-                            if un: self._xposed_unhooks.append(un)
-                    except Exception as e:
-                        log(f"SyncProfile: hook Theme.getColor error: {e}")
 
             if PeerColorClass:
                 class PeerColorGetColorHook(MethodHook):
@@ -876,100 +841,6 @@ class Plugin(BasePlugin):
                     except Exception as e:
                         log(f"SyncProfile: hook PeerColors.getColor error: {e}")
 
-            if ChatMessageCellClass:
-                def _apply_cell_reply_color(cell, msg, is_draw_phase: bool = False):
-                    if not cell or not msg:
-                        return
-                    try:
-                        r_uid = plugin_self._extract_reply_uid(msg)
-                        if r_uid > 0:
-                            plugin_self._queue_fetch_user(r_uid)
-                            nc = plugin_self._resolve_color_id_for_user(r_uid)
-                            bg_em = plugin_self._resolve_emoji_id_for_user(r_uid)
-                            vibrant_rgb = plugin_self._get_vibrant_color_for_id(nc)
-
-                            try:
-                                mo = getattr(msg, "messageOwner", None)
-                                if mo and hasattr(mo, "reply_to") and mo.reply_to:
-                                    if bg_em != 0:
-                                        mo.reply_to.background_emoji_id = bg_em
-                                        flags = getattr(mo.reply_to, "flags", 0) or 0
-                                        mo.reply_to.flags = flags | 128
-                                    if hasattr(mo.reply_to, "reply_to_peer_id") and mo.reply_to.reply_to_peer_id:
-                                        mo.reply_to.reply_to_peer_id.color = nc
-                                    if hasattr(mo.reply_to, "reply_from") and mo.reply_to.reply_from:
-                                        mo.reply_to.reply_from.color = nc
-                            except Exception:
-                                pass
-
-                            if is_draw_phase:
-                                plugin_self._active_reply_rgb = vibrant_rgb
-
-                            for attr in ("replyNameColor", "replyLineColor", "quoteColor"):
-                                try:
-                                    setattr(cell, attr, vibrant_rgb)
-                                except Exception:
-                                    pass
-                    except Exception:
-                        pass
-
-                class ChatMessageCellDrawHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            cell = getattr(param, "thisObject", None)
-                            if cell:
-                                msg = getattr(cell, "currentMessageObject", None)
-                                _apply_cell_reply_color(cell, msg, is_draw_phase=True)
-                        except Exception:
-                            pass
-
-                    def after_hooked_method(self, param):
-                        try:
-                            cell = getattr(param, "thisObject", None)
-                            if cell:
-                                args = getattr(param, "args", None)
-                                msg = args[0] if args and len(args) > 0 else getattr(cell, "currentMessageObject", None)
-                                _apply_cell_reply_color(cell, msg, is_draw_phase=False)
-                            plugin_self._active_reply_rgb = 0
-                        except Exception:
-                            pass
-
-                class ChatMessageCellSetMsgHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            cell = getattr(param, "thisObject", None)
-                            if cell:
-                                args = getattr(param, "args", None)
-                                msg = args[0] if args and len(args) > 0 else getattr(cell, "currentMessageObject", None)
-                                _apply_cell_reply_color(cell, msg, is_draw_phase=False)
-                        except Exception:
-                            pass
-
-                    def after_hooked_method(self, param):
-                        try:
-                            cell = getattr(param, "thisObject", None)
-                            if cell:
-                                args = getattr(param, "args", None)
-                                msg = args[0] if args and len(args) > 0 else getattr(cell, "currentMessageObject", None)
-                                _apply_cell_reply_color(cell, msg, is_draw_phase=False)
-                            plugin_self._active_reply_rgb = 0
-                        except Exception:
-                            pass
-
-                for m in ChatMessageCellClass.getDeclaredMethods():
-                    try:
-                        m_name = m.getName()
-                        if m_name in ("onDraw", "draw", "dispatchDraw", "drawReply", "drawQuote", "drawReplyText"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, ChatMessageCellDrawHook())
-                            if un: self._xposed_unhooks.append(un)
-                        elif m_name in ("setMessageObject", "createReplyLayout", "buildReplyLayout", "checkReplyLayout"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, ChatMessageCellSetMsgHook())
-                            if un: self._xposed_unhooks.append(un)
-                    except Exception as e:
-                        log(f"SyncProfile: hook ChatMessageCell method {m} error: {e}")
-
             if UserObjectClass:
                 class IsPremiumUserHook(MethodHook):
                     def after_hooked_method(self, param):
@@ -991,7 +862,8 @@ class Plugin(BasePlugin):
                             if args and len(args) > 0 and hasattr(args[0], "id"):
                                 u = args[0]
                                 c_id = plugin_self._resolve_color_id_for_user(u)
-                                param.setResult(c_id)
+                                if c_id != 0:
+                                    param.setResult(c_id)
                         except Exception:
                             pass
 
@@ -1004,7 +876,9 @@ class Plugin(BasePlugin):
                                 if uid > 0:
                                     prof = plugin_self.get_cached_profile(uid)
                                     if prof and prof.get("name_bg_emoji_id"):
-                                        param.setResult(int(prof["name_bg_emoji_id"]))
+                                        em_id = int(prof["name_bg_emoji_id"])
+                                        if em_id != 0:
+                                            param.setResult(em_id)
                         except Exception:
                             pass
 
@@ -1015,7 +889,8 @@ class Plugin(BasePlugin):
                             if args and len(args) > 0 and hasattr(args[0], "id"):
                                 u = args[0]
                                 prc = plugin_self._resolve_profile_color_id_for_user(u)
-                                param.setResult(prc)
+                                if prc != 0:
+                                    param.setResult(prc)
                         except Exception:
                             pass
 
@@ -1028,7 +903,9 @@ class Plugin(BasePlugin):
                                 if uid > 0:
                                     prof = plugin_self.get_cached_profile(uid)
                                     if prof and prof.get("profile_bg_emoji_id"):
-                                        param.setResult(int(prof["profile_bg_emoji_id"]))
+                                        em_id = int(prof["profile_bg_emoji_id"])
+                                        if em_id != 0:
+                                            param.setResult(em_id)
                         except Exception:
                             pass
 
@@ -1052,10 +929,11 @@ class Plugin(BasePlugin):
                             if args and len(args) > 0 and hasattr(args[0], "id"):
                                 u = args[0]
                                 c_id = plugin_self._resolve_color_id_for_user(u)
-                                acc = getattr(args[0], "currentAccount", 0) if len(args) < 2 else args[1]
-                                pc = plugin_self._get_peer_color_object(acc, c_id, is_profile=False)
-                                if pc:
-                                    param.setResult(pc)
+                                if c_id != 0:
+                                    acc = getattr(args[0], "currentAccount", 0) if len(args) < 2 else args[1]
+                                    pc = plugin_self._get_peer_color_object(acc, c_id, is_profile=False)
+                                    if pc:
+                                        param.setResult(pc)
                         except Exception:
                             pass
 
@@ -1104,14 +982,13 @@ class Plugin(BasePlugin):
                                 if peer:
                                     uid = plugin_self._extract_peer_uid(peer)
                                 if uid == 0:
-                                    uid = int(getattr(msg_obj, "getDialogId", lambda: 0)() or 0)
-                                if uid == 0:
                                     mo = getattr(msg_obj, "messageOwner", None)
                                     if mo:
                                         uid = plugin_self._extract_peer_uid(getattr(mo, "from_id", None))
                                 if uid > 0:
                                     c_id = plugin_self._resolve_color_id_for_user(uid)
-                                    param.setResult(c_id)
+                                    if c_id != 0:
+                                        param.setResult(c_id)
                         except Exception:
                             pass
 
@@ -1123,7 +1000,8 @@ class Plugin(BasePlugin):
                                 r_uid = plugin_self._extract_reply_uid(msg_obj)
                                 if r_uid > 0:
                                     c_id = plugin_self._resolve_color_id_for_user(r_uid)
-                                    param.setResult(c_id)
+                                    if c_id != 0:
+                                        param.setResult(c_id)
                         except Exception:
                             pass
 
@@ -1136,8 +1014,6 @@ class Plugin(BasePlugin):
                                 peer = getattr(msg_obj, "getFromPeer", lambda: None)()
                                 if peer:
                                     uid = plugin_self._extract_peer_uid(peer)
-                                if uid == 0:
-                                    uid = int(getattr(msg_obj, "getDialogId", lambda: 0)() or 0)
                                 if uid == 0:
                                     mo = getattr(msg_obj, "messageOwner", None)
                                     if mo:
@@ -1172,7 +1048,9 @@ class Plugin(BasePlugin):
                                 if peer:
                                     uid = plugin_self._extract_peer_uid(peer)
                                 if uid == 0:
-                                    uid = int(getattr(msg_obj, "getDialogId", lambda: 0)() or 0)
+                                    mo = getattr(msg_obj, "messageOwner", None)
+                                    if mo:
+                                        uid = plugin_self._extract_peer_uid(getattr(mo, "from_id", None))
                                 if uid > 0:
                                     em_id = plugin_self._resolve_emoji_id_for_user(uid)
                                     if em_id != 0:
@@ -1203,13 +1081,16 @@ class Plugin(BasePlugin):
                                 if peer:
                                     uid = plugin_self._extract_peer_uid(peer)
                                 if uid == 0:
-                                    uid = int(getattr(msg_obj, "getDialogId", lambda: 0)() or 0)
+                                    mo = getattr(msg_obj, "messageOwner", None)
+                                    if mo:
+                                        uid = plugin_self._extract_peer_uid(getattr(mo, "from_id", None))
                                 if uid > 0:
                                     nc = plugin_self._resolve_color_id_for_user(uid)
-                                    acc = getattr(msg_obj, "currentAccount", 0)
-                                    pc = plugin_self._get_peer_color_object(acc, nc, is_profile=False)
-                                    if pc:
-                                        param.setResult(pc)
+                                    if nc != 0:
+                                        acc = getattr(msg_obj, "currentAccount", 0)
+                                        pc = plugin_self._get_peer_color_object(acc, nc, is_profile=False)
+                                        if pc:
+                                            param.setResult(pc)
                         except Exception:
                             pass
 
@@ -1221,10 +1102,11 @@ class Plugin(BasePlugin):
                                 r_uid = plugin_self._extract_reply_uid(msg_obj)
                                 if r_uid > 0:
                                     nc = plugin_self._resolve_color_id_for_user(r_uid)
-                                    acc = getattr(msg_obj, "currentAccount", 0)
-                                    pc = plugin_self._get_peer_color_object(acc, nc, is_profile=False)
-                                    if pc:
-                                        param.setResult(pc)
+                                    if nc != 0:
+                                        acc = getattr(msg_obj, "currentAccount", 0)
+                                        pc = plugin_self._get_peer_color_object(acc, nc, is_profile=False)
+                                        if pc:
+                                            param.setResult(pc)
                         except Exception:
                             pass
 
@@ -1236,7 +1118,8 @@ class Plugin(BasePlugin):
                                 r_uid = plugin_self._extract_reply_uid(msg_obj)
                                 if r_uid > 0:
                                     nc = plugin_self._resolve_color_id_for_user(r_uid)
-                                    param.setResult(plugin_self._get_vibrant_color_for_id(nc))
+                                    if nc != 0:
+                                        param.setResult(plugin_self._get_vibrant_color_for_id(nc))
                         except Exception:
                             pass
 
@@ -1723,17 +1606,22 @@ class Plugin(BasePlugin):
             pbg = _safe_int(profile.get("profile_bg_emoji_id", 0))
             em_id = _safe_int(profile.get("emoji_status_id", 0))
 
+            f2 = int(getattr(u, "flags2", 0))
             is_prem = bool(profile.get("premium", True))
             if is_prem:
                 u.premium = True
                 u.flags = int(getattr(u, "flags", 0) | 0x10000000)
-
-            u.color = _build_peer_color(nc, nbg)
-            u.profile_color = _build_peer_color(prc, pbg)
-
-            f2 = int(getattr(u, "flags2", 0) | 256 | 512)
-            if is_prem:
                 f2 |= 2
+
+            pc_obj = _build_peer_color(nc, nbg)
+            if pc_obj:
+                u.color = pc_obj
+                f2 |= 256
+
+            prc_obj = _build_peer_color(prc, pbg)
+            if prc_obj:
+                u.profile_color = prc_obj
+                f2 |= 512
 
             if em_id != 0:
                 st = TLRPC.TL_emojiStatus()
@@ -1767,13 +1655,18 @@ class Plugin(BasePlugin):
             prc = _safe_int(profile.get("profile_color", 0))
             pbg = _safe_int(profile.get("profile_bg_emoji_id", 0))
 
-            fu.profile_color = _build_peer_color(prc, pbg)
-            f2 = int(getattr(fu, "flags2", 0) | 256 | 512)
+            f2 = int(getattr(fu, "flags2", 0))
+            prc_obj = _build_peer_color(prc, pbg)
+            if prc_obj:
+                fu.profile_color = prc_obj
+                f2 |= 512
+
             if hasattr(fu, "color"):
-                fu.color = _build_peer_color(nc, nbg)
+                nc_obj = _build_peer_color(nc, nbg)
+                if nc_obj:
+                    fu.color = nc_obj
+                    f2 |= 256
             fu.flags2 = f2
-            if hasattr(fu, "flags"):
-                fu.flags = int(getattr(fu, "flags", 0) | 0x200)
 
             if hasattr(fu, "user") and fu.user:
                 self._patch_user_tl_object(fu.user)
@@ -1868,12 +1761,14 @@ class Plugin(BasePlugin):
             if isinstance(peer, (int, float)):
                 val = int(peer)
                 return val if val > 0 else 0
-            for attr in ("user_id", "id", "channel_id", "chat_id"):
-                uid = getattr(peer, attr, 0)
-                if uid:
-                    val = int(uid)
-                    if val > 0:
-                        return val
+            if hasattr(peer, "user_id"):
+                val = int(getattr(peer, "user_id", 0) or 0)
+                if val > 0:
+                    return val
+            if hasattr(peer, "id") and not hasattr(peer, "channel_id") and not hasattr(peer, "chat_id"):
+                val = int(getattr(peer, "id", 0) or 0)
+                if val > 0:
+                    return val
         except Exception:
             pass
         return 0
@@ -1926,38 +1821,6 @@ class Plugin(BasePlugin):
                             missing_uids.append(target_uid)
                 except Exception:
                     pass
-
-            messages = getattr(obj, "messages", None)
-            if messages:
-                m_count = messages.size() if hasattr(messages, "size") else len(messages)
-                for i in range(min(m_count, 100)):
-                    try:
-                        m = messages.get(i) if hasattr(messages, "get") else messages[i]
-                        if not m:
-                            continue
-                        fid = self._extract_peer_uid(getattr(m, "from_id", None))
-                        if fid > 0 and fid not in self._profiles_cache:
-                            missing_uids.append(fid)
-                        r_hdr = getattr(m, "reply_to", None)
-                        if r_hdr:
-                            r_peer = getattr(r_hdr, "reply_to_peer_id", None)
-                            r_uid = self._extract_peer_uid(r_peer)
-                            if r_uid > 0 and r_uid not in self._profiles_cache:
-                                missing_uids.append(r_uid)
-                            r_from = getattr(r_hdr, "reply_from", None)
-                            if r_from:
-                                rf_peer = getattr(r_from, "from_id", None)
-                                rf_uid = self._extract_peer_uid(rf_peer)
-                                if rf_uid > 0 and rf_uid not in self._profiles_cache:
-                                    missing_uids.append(rf_uid)
-                        fwd = getattr(m, "fwd_from", None)
-                        if fwd:
-                            fwd_peer = getattr(fwd, "from_id", None)
-                            fwd_uid = self._extract_peer_uid(fwd_peer)
-                            if fwd_uid > 0 and fwd_uid not in self._profiles_cache:
-                                missing_uids.append(fwd_uid)
-                    except Exception:
-                        pass
 
             updates = getattr(obj, "updates", None)
             if updates:
