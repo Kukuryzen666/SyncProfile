@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.15"
+__version__ = "10.2.16"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -1207,14 +1207,10 @@ class Plugin(BasePlugin):
                         try:
                             user_obj = param.getResult()
                             if user_obj:
-                                uid = int(getattr(user_obj, "id", 0) or 0)
-                                patched = plugin_self._patch_user_tl_object(user_obj)
-                                # If the user is NOT in our cache yet, queue a batch fetch
-                                # so next time getUser() is called the emoji status will be there
-                                if not patched and uid > 0:
-                                    plugin_self._queue_fetch_user(uid)
+                                plugin_self._patch_user_tl_object(user_obj)
                         except Exception:
                             pass
+
 
                 class GetUserFullHook(MethodHook):
                     def after_hooked_method(self, param):
@@ -1393,7 +1389,9 @@ class Plugin(BasePlugin):
                                             pass
                                     # Only post safe name/status update — do NOT include DIALOGS_CHANGED
                                     # which resets the folder tab to All Chats
-                                    safe_mask = 1 | 4 | 524288  # NAME=1, STATUS=4, EMOJI_STATUS=524288
+                                    # NAME=1, EMOJI_STATUS=524288 only
+                                    # Do NOT include STATUS=4 — it re-sorts dialogs and resets the folder tab
+                                    safe_mask = 1 | 524288
                                     try:
                                         n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
                                     except Exception:
@@ -1564,7 +1562,8 @@ class Plugin(BasePlugin):
                                                 plugin_self._patch_user_tl_object(u_obj)
                                         except Exception:
                                             pass
-                                    safe_mask = 1 | 4 | 524288
+                                    # NAME=1, EMOJI_STATUS=524288 only — no STATUS=4 (resets folder)
+                                    safe_mask = 1 | 524288
                                     try:
                                         n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
                                     except Exception:
@@ -1776,9 +1775,9 @@ class Plugin(BasePlugin):
                 from org.telegram.messenger import NotificationCenter
                 n_c = NotificationCenter.getInstance(sel_acc)
                 if n_c:
-                    # Safe: NAME=1, STATUS=4, EMOJI_STATUS=524288
-                    # Do NOT use AVATAR=2 or dialogs-change bits — those reset the folder tab
-                    safe_mask = 1 | 4 | 524288
+                    # Safe: NAME=1, EMOJI_STATUS=524288 only
+                    # Do NOT use AVATAR=2, STATUS=4, or dialogs-change bits — those reset the folder tab
+                    safe_mask = 1 | 524288
                     try:
                         n_c.postNotificationName(NotificationCenter.updateInterfaces, safe_mask)
                     except Exception:
