@@ -76,7 +76,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.7"
+__version__ = "10.2.8"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -291,8 +291,8 @@ class Plugin(BasePlugin):
         self._register_menu_items()
         self._register_xposed_hooks()
         
-        # Defer initial apply slightly so DialogsActivity can complete cold start initialization smoothly
-        threading.Timer(4.0, self._apply_all_to_all_accounts).start()
+        # Apply cached profiles to UI smoothly as soon as DialogsActivity finishes attaching
+        threading.Timer(0.8, self._apply_all_to_all_accounts).start()
 
         if HAS_ZWYLIB:
             async_manager.run_task(self._async_initial_background_sync())
@@ -1049,6 +1049,23 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
+                class GetEmojiStatusDocumentIdHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            res = param.getResult()
+                            if res is None or res == 0:
+                                args = getattr(param, "args", None)
+                                if args and len(args) > 0 and args[0] is not None:
+                                    target = args[0]
+                                    uid = int(getattr(target, "id", 0) or 0)
+                                    if uid > 0:
+                                        em_id = plugin_self._resolve_emoji_id_for_user(uid)
+                                        if em_id != 0:
+                                            from java.lang import Long
+                                            param.setResult(Long(em_id))
+                        except Exception:
+                            pass
+
                 class GetPeerColorForUserHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
@@ -1083,11 +1100,15 @@ class Plugin(BasePlugin):
                             m.setAccessible(True)
                             un = self.hook_method(m, GetProfileColorIdHook())
                             if un: self._xposed_unhooks.append(un)
-                        elif m_name == "getProfileEmojiId":
+                        elif m_name in ("getProfileEmojiId", "getOnlyProfileEmojiId"):
                             m.setAccessible(True)
                             un = self.hook_method(m, GetProfileEmojiIdHook())
                             if un: self._xposed_unhooks.append(un)
-                        elif m_name == "hasColor":
+                        elif m_name in ("getEmojiStatusDocumentId", "getEmojiStatusId"):
+                            m.setAccessible(True)
+                            un = self.hook_method(m, GetEmojiStatusDocumentIdHook())
+                            if un: self._xposed_unhooks.append(un)
+                        elif m_name in ("hasColor", "hasEmojiStatus"):
                             m.setAccessible(True)
                             un = self.hook_method(m, HasColorHook())
                             if un: self._xposed_unhooks.append(un)
@@ -1487,10 +1508,10 @@ class Plugin(BasePlugin):
                     continue
                 self._pending_user_ids.add(uid)
 
-            if len(self._pending_user_ids) >= 15:
+            if len(self._pending_user_ids) >= 10:
                 should_flush_now = True
             elif self._pending_user_ids and self._batch_timer is None:
-                self._batch_timer = threading.Timer(0.35, self._execute_batch_fetch)
+                self._batch_timer = threading.Timer(0.15, self._execute_batch_fetch)
                 self._batch_timer.daemon = True
                 self._batch_timer.start()
 
@@ -1562,20 +1583,23 @@ class Plugin(BasePlugin):
                                     for u_id in found_ids:
                                         u = mc.getUser(u_id)
                                         if u:
-                                            self._patch_user_tl_object(u)
+                                            plugin_self._patch_user_tl_object(u)
                                             mc.putUser(u, True)
                                             try:
                                                 n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
                                             except Exception:
                                                 pass
-                                        fu = mc.getUserFull(u_id)
-                                        if fu:
-                                            self._patch_full_user_tl_object(fu, u_id)
-                                            mc.putUserFull(fu)
                                             try:
-                                                n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
+                                                n_em_st = getattr(NotificationCenter, "userEmojiStatusUpdated", None)
+                                                if n_em_st is not None:
+                                                    n_c.postNotificationName(n_em_st, int(u_id))
                                             except Exception:
                                                 pass
+                                        fu = mc.getUserFull(u_id)
+                                        if fu:
+                                            plugin_self._patch_full_user_tl_object(fu, u_id)
+                                            mc.putUserFull(fu)
+
                                     # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
                                     safe_mask = 1 | 2 | 4 | 524288
                                     try:
@@ -1586,6 +1610,12 @@ class Plugin(BasePlugin):
                                         n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
                                         if n_id is not None:
                                             n_c.postNotificationName(n_id)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        n_em = getattr(NotificationCenter, "emojiLoaded", None)
+                                        if n_em is not None:
+                                            n_c.postNotificationName(n_em)
                                     except Exception:
                                         pass
                             except Exception:
@@ -1599,19 +1629,64 @@ class Plugin(BasePlugin):
         except Exception as e:
             logger.error(f"Batch fetch error: {e}")
 
+    def _prefetch_visible_dialog_users(self):
+        try:
+            from org.telegram.messenger import MessagesController, UserConfig
+            my_uids = set(self._get_my_active_uids())
+            missing = []
+            for acc in range(4):
+                try:
+                    u_cfg = UserConfig.getInstance(acc)
+                    if not u_cfg or not u_cfg.isClientActivated():
+                        continue
+                    mc = MessagesController.getInstance(acc)
+                    if not mc or not hasattr(mc, "allDialogs"):
+                        continue
+                    dialogs = getattr(mc, "allDialogs", None)
+                    if not dialogs:
+                        continue
+                    count = dialogs.size() if hasattr(dialogs, "size") else len(dialogs)
+                    for i in range(min(count, 40)):
+                        d = dialogs.get(i) if hasattr(dialogs, "get") else dialogs[i]
+                        if d and hasattr(d, "id"):
+                            did = int(d.id or 0)
+                            if did > 0 and did not in my_uids:
+                                if did not in self._profiles_cache and did not in self._unknown_uids_seen:
+                                    missing.append(did)
+                except Exception:
+                    pass
+            if missing:
+                self._queue_fetch_users_bulk(missing)
+        except Exception:
+            pass
+
     def _initial_background_sync(self):
-        time.sleep(8)
+        last_ts = self.get_setting("_last_sync_timestamp", 0)
+        cache_empty = len(self._profiles_cache) == 0 or last_ts == 0
+        delay = 0.2 if cache_empty else 1.0
+        time.sleep(delay)
         if not self._is_running:
             return
         if self.get_setting("enable_sync", True):
-            self.sync_delta_updates_from_server(show_bulletin=False)
+            if cache_empty:
+                self._sync_database(show_bulletin=False, force_clean=False)
+            else:
+                self.sync_delta_updates_from_server(show_bulletin=False)
+            self._prefetch_visible_dialog_users()
 
     async def _async_initial_background_sync(self):
-        await asyncio.sleep(8)
+        last_ts = self.get_setting("_last_sync_timestamp", 0)
+        cache_empty = len(self._profiles_cache) == 0 or last_ts == 0
+        delay = 0.2 if cache_empty else 1.0
+        await asyncio.sleep(delay)
         if not self._is_running:
             return
         if self.get_setting("enable_sync", True):
-            await self._async_sync_delta_updates(show_bulletin=False)
+            if cache_empty:
+                await self._async_sync_database(show_bulletin=False, force_clean=False)
+            else:
+                await self._async_sync_delta_updates(show_bulletin=False)
+            self._prefetch_visible_dialog_users()
 
     def _keep_alive_sync_loop(self):
         while self._is_running:
@@ -1749,20 +1824,23 @@ class Plugin(BasePlugin):
                                     for u_id in updated_ids:
                                         u = mc.getUser(u_id)
                                         if u:
-                                            self._patch_user_tl_object(u)
+                                            plugin_self._patch_user_tl_object(u)
                                             mc.putUser(u, True)
                                             try:
                                                 n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(u_id), u)
                                             except Exception:
                                                 pass
-                                        fu = mc.getUserFull(u_id)
-                                        if fu:
-                                            self._patch_full_user_tl_object(fu, u_id)
-                                            mc.putUserFull(fu)
                                             try:
-                                                n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(u_id), fu)
+                                                n_em_st = getattr(NotificationCenter, "userEmojiStatusUpdated", None)
+                                                if n_em_st is not None:
+                                                    n_c.postNotificationName(n_em_st, int(u_id))
                                             except Exception:
                                                 pass
+                                        fu = mc.getUserFull(u_id)
+                                        if fu:
+                                            plugin_self._patch_full_user_tl_object(fu, u_id)
+                                            mc.putUserFull(fu)
+
                                     # 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
                                     safe_mask = 1 | 2 | 4 | 524288
                                     try:
@@ -1773,6 +1851,12 @@ class Plugin(BasePlugin):
                                         n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
                                         if n_id is not None:
                                             n_c.postNotificationName(n_id)
+                                    except Exception:
+                                        pass
+                                    try:
+                                        n_em = getattr(NotificationCenter, "emojiLoaded", None)
+                                        if n_em is not None:
+                                            n_c.postNotificationName(n_em)
                                     except Exception:
                                         pass
                             except Exception:
@@ -1976,12 +2060,12 @@ class Plugin(BasePlugin):
                                     n_c.postNotificationName(NotificationCenter.userInfoDidLoad, int(my_acc_uid), curr_u)
                                 except Exception:
                                     pass
-                                fu_my = mc.getUserFull(my_acc_uid)
-                                if fu_my:
-                                    try:
-                                        n_c.postNotificationName(NotificationCenter.userFullDidLoad, int(my_acc_uid), fu_my)
-                                    except Exception:
-                                        pass
+                                try:
+                                    n_em_st = getattr(NotificationCenter, "userEmojiStatusUpdated", None)
+                                    if n_em_st is not None:
+                                        n_c.postNotificationName(n_em_st, int(my_acc_uid))
+                                except Exception:
+                                    pass
 
                             # Safe update mask: 1=NAME, 2=AVATAR, 4=STATUS, 524288=EMOJI_STATUS
                             safe_mask = 1 | 2 | 4 | 524288
@@ -1994,6 +2078,13 @@ class Plugin(BasePlugin):
                                 n_id = getattr(NotificationCenter, "didUpdateMessagesViews", None)
                                 if n_id is not None:
                                     n_c.postNotificationName(n_id)
+                            except Exception:
+                                pass
+
+                            try:
+                                n_em = getattr(NotificationCenter, "emojiLoaded", None)
+                                if n_em is not None:
+                                    n_c.postNotificationName(n_em)
                             except Exception:
                                 pass
 
