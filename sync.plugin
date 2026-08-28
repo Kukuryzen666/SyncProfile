@@ -81,7 +81,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.28"
+__version__ = "10.2.29"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -189,6 +189,28 @@ def _is_user(obj: Any) -> bool:
         return True
     return False
 
+def _is_chat(obj: Any) -> bool:
+    if obj is None:
+        return False
+    if hasattr(obj, "title") or hasattr(obj, "broadcast") or hasattr(obj, "megagroup") or hasattr(obj, "participants_count"):
+        return True
+    cls_name = getattr(obj, "__class__", None)
+    if cls_name and ("Chat" in str(cls_name) or "Channel" in str(cls_name)):
+        return True
+    return False
+
+def _normalize_chat_id(cid: Any) -> int:
+    raw = _safe_int(cid, 0)
+    if raw == 0:
+        return 0
+    s = str(raw)
+    if s.startswith("-100") and len(s) > 4:
+        try:
+            return int(s[4:])
+        except Exception:
+            return abs(raw)
+    return abs(raw)
+
 def _get_class_methods(cls_obj: Any) -> List[Any]:
     if cls_obj is None:
         return []
@@ -238,13 +260,16 @@ class Plugin(BasePlugin):
     def __init__(self):
         super().__init__()
         self._profiles_cache: Dict[int, Dict[str, Any]] = {}
+        self._chats_cache: Dict[int, Dict[str, Any]] = {}
         self._sync_lock = threading.Lock()
         # Lock-free snapshot for hot-path reads from UI/getter threads
         self._profiles_snapshot: Dict[int, Dict[str, Any]] = {}
+        self._chats_snapshot: Dict[int, Dict[str, Any]] = {}
         self._cache_dirty = False
         self._is_running = True
         self._xposed_unhooks: List[Any] = []
         self._json_cache_file = None
+        self._last_selected_message: Optional[Any] = None
 
         if HAS_ZWYLIB:
             try:
@@ -534,6 +559,41 @@ class Plugin(BasePlugin):
         """Replace the lock-free snapshot with the current cache state.
         Safe for concurrent lock-free reads under CPython GIL."""
         self._profiles_snapshot = dict(self._profiles_cache)
+        self._chats_snapshot = dict(self._chats_cache)
+
+    def _parse_items_map(self, raw_data: Any, is_chat: bool = False) -> Dict[int, Dict[str, Any]]:
+        result = {}
+        if not raw_data:
+            return result
+
+        if isinstance(raw_data, list):
+            for item in raw_data:
+                if not isinstance(item, dict):
+                    continue
+                if is_chat:
+                    k_id = _normalize_chat_id(item.get("chat_id") if "chat_id" in item else item.get("id"))
+                else:
+                    k_id = _safe_int(item.get("user_id") if "user_id" in item else item.get("id"))
+                if k_id > 0:
+                    result[k_id] = item
+        elif isinstance(raw_data, dict):
+            for k, v in raw_data.items():
+                if isinstance(v, dict):
+                    if is_chat:
+                        k_id = _normalize_chat_id(v.get("chat_id") if "chat_id" in v else (v.get("id") if "id" in v else k))
+                    else:
+                        k_id = _safe_int(v.get("user_id") if "user_id" in v else (v.get("id") if "id" in v else k))
+                    if k_id > 0:
+                        result[k_id] = v
+                else:
+                    if is_chat:
+                        k_id = _normalize_chat_id(k)
+                    else:
+                        k_id = _safe_int(k)
+                    if k_id > 0:
+                        result[k_id] = {"id": k_id, "data": v}
+
+        return result
 
     def _patch_user_tl_object(self, u: Any) -> bool:
         if not u:
@@ -639,6 +699,133 @@ class Plugin(BasePlugin):
         except Exception:
             return False
 
+    def _patch_chat_tl_object(self, chat: Any) -> bool:
+        if not chat:
+            return False
+        try:
+            raw_id = getattr(chat, "id", 0)
+            cid = _normalize_chat_id(raw_id)
+        except Exception:
+            return False
+
+        if cid <= 0:
+            return False
+
+        if not _is_chat(chat):
+            return False
+
+        # Normalize video avatar flags
+        try:
+            ph = getattr(chat, "photo", None)
+            if ph:
+                v_sizes = getattr(ph, "video_sizes", None)
+                has_v = bool(
+                    getattr(ph, "has_video", False)
+                    or (v_sizes and (hasattr(v_sizes, "isEmpty") and not v_sizes.isEmpty() or len(v_sizes) > 0))
+                    or ((int(getattr(ph, "flags", 0) or 0) & 1) != 0)
+                )
+                if has_v:
+                    ph.has_video = True
+                    ph.flags = int(getattr(ph, "flags", 0) | 1)
+        except Exception:
+            pass
+
+        snap = getattr(self, "_chats_snapshot", None)
+        profile = snap.get(cid) if snap else None
+        if profile is None:
+            with self._sync_lock:
+                profile = self._chats_cache.get(cid)
+
+        if not profile:
+            return False
+
+        try:
+            global TLRPC
+            if TLRPC is None:
+                from org.telegram.tgnet import TLRPC as _TLRPC
+                TLRPC = _TLRPC
+
+            nc = _safe_int(profile.get("name_color", 0))
+            nbg = _safe_int(profile.get("name_bg_emoji_id", 0))
+            prc = _safe_int(profile.get("profile_color", 0))
+            pbg = _safe_int(profile.get("profile_bg_emoji_id", 0))
+            em_id = _safe_int(profile.get("emoji_status_id", 0))
+            boost_lvl = _safe_int(profile.get("boost_level", 0))
+
+            pc_obj = _build_peer_color(nc, nbg)
+            if pc_obj is not None:
+                chat.color = pc_obj
+
+            prc_obj = _build_peer_color(prc, pbg)
+            if prc_obj is not None:
+                chat.profile_color = prc_obj
+
+            if em_id != 0:
+                st = TLRPC.TL_emojiStatus()
+                st.document_id = em_id
+                chat.emoji_status = st
+
+            if boost_lvl > 0:
+                chat.level = boost_lvl
+
+            return True
+        except Exception:
+            return False
+
+    def _patch_full_chat_tl_object(self, fc: Any, chat_id: int) -> bool:
+        if not fc:
+            return False
+        cid = _normalize_chat_id(chat_id or getattr(fc, "id", 0))
+        if cid <= 0:
+            return False
+
+        snap = getattr(self, "_chats_snapshot", None)
+        profile = snap.get(cid) if snap else None
+        if profile is None:
+            with self._sync_lock:
+                profile = self._chats_cache.get(cid)
+
+        if not profile:
+            return False
+
+        try:
+            global TLRPC
+            if TLRPC is None:
+                from org.telegram.tgnet import TLRPC as _TLRPC
+                TLRPC = _TLRPC
+
+            nc = _safe_int(profile.get("name_color", 0))
+            nbg = _safe_int(profile.get("name_bg_emoji_id", 0))
+            prc = _safe_int(profile.get("profile_color", 0))
+            pbg = _safe_int(profile.get("profile_bg_emoji_id", 0))
+            em_id = _safe_int(profile.get("emoji_status_id", 0))
+            boost_lvl = _safe_int(profile.get("boost_level", 0))
+
+            prc_obj = _build_peer_color(prc, pbg)
+            if prc_obj is not None:
+                fc.profile_color = prc_obj
+
+            if hasattr(fc, "color"):
+                nc_obj = _build_peer_color(nc, nbg)
+                if nc_obj is not None:
+                    fc.color = nc_obj
+
+            if em_id != 0:
+                st = TLRPC.TL_emojiStatus()
+                st.document_id = em_id
+                fc.custom_status = st
+                fc.emoji_status = st
+
+            if boost_lvl > 0:
+                fc.boosts_applied = boost_lvl
+
+            if hasattr(fc, "chat") and fc.chat and _is_chat(fc.chat):
+                self._patch_chat_tl_object(fc.chat)
+
+            return True
+        except Exception:
+            return False
+
     def _register_xposed_hooks(self):
         try:
             MessagesControllerClass = find_class("org.telegram.messenger.MessagesController")
@@ -665,6 +852,26 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
+                class GetChatHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            chat_obj = param.getResult()
+                            if chat_obj and _is_chat(chat_obj):
+                                plugin_self._patch_chat_tl_object(chat_obj)
+                        except Exception:
+                            pass
+
+                class GetChatFullHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            fc_obj = param.getResult()
+                            if fc_obj:
+                                cid = getattr(fc_obj, "id", 0)
+                                if cid:
+                                    plugin_self._patch_full_chat_tl_object(fc_obj, int(cid))
+                        except Exception:
+                            pass
+
                 for m in _get_class_methods(MessagesControllerClass):
                     try:
                         m_name = m.getName()
@@ -679,6 +886,18 @@ class Plugin(BasePlugin):
                         elif m_name == "getUserFull" and len(p_types) == 1:
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetUserFullHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                        elif m_name == "getChat" and len(p_types) == 1:
+                            p0_name = p_types[0].getName()
+                            if p0_name in ("long", "java.lang.Long", "int", "java.lang.Integer"):
+                                m.setAccessible(True)
+                                unhook = self.hook_method(m, GetChatHook())
+                                if unhook:
+                                    self._xposed_unhooks.append(unhook)
+                        elif m_name == "getChatFull" and len(p_types) == 1:
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, GetChatFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
                     except Exception as e:
@@ -715,6 +934,60 @@ class Plugin(BasePlugin):
                         if m.getName() in ("hasAnimatedAvatar", "canAnimateAvatar"):
                             m.setAccessible(True)
                             un = self.hook_method(m, UserHasAnimatedAvatarHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception:
+                        pass
+
+            # Hook ChatMessageCell and ChatActivity to capture the selected message for context menus
+            ChatMessageCellClass = find_class("org.telegram.ui.Cells.ChatMessageCell")
+            if ChatMessageCellClass:
+                class ChatMessageCellMenuHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            this_cell = getattr(param, "thisObject", None)
+                            if this_cell is not None:
+                                mo = plugin_self._resolve_message_object(this_cell)
+                                if mo is not None:
+                                    plugin_self._last_selected_message = mo
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(ChatMessageCellClass):
+                    try:
+                        if m.getName() in ("createMenu", "showPopupMenu", "onLongClick", "showMenu", "openMenu"):
+                            m.setAccessible(True)
+                            un = self.hook_method(m, ChatMessageCellMenuHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception:
+                        pass
+
+            ChatActivityClass = find_class("org.telegram.ui.ChatActivity")
+            if ChatActivityClass:
+                class ChatActivityMenuHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args:
+                                for arg in args:
+                                    mo = plugin_self._resolve_message_object(arg)
+                                    if mo is not None:
+                                        plugin_self._last_selected_message = mo
+                                        return
+                            this_act = getattr(param, "thisObject", None)
+                            if this_act is not None:
+                                mo = plugin_self._resolve_message_object(this_act)
+                                if mo is not None:
+                                    plugin_self._last_selected_message = mo
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(ChatActivityClass):
+                    try:
+                        if m.getName() in ("createMenu", "showMenuForCell", "showPopupMenu", "onItemClick", "processSelectedOption"):
+                            m.setAccessible(True)
+                            un = self.hook_method(m, ChatActivityMenuHook())
                             if un:
                                 self._xposed_unhooks.append(un)
                     except Exception:
@@ -1130,7 +1403,10 @@ class Plugin(BasePlugin):
             return
         try:
             with self._sync_lock:
-                cache_copy = dict(self._profiles_cache)
+                cache_copy = {
+                    "profiles": dict(self._profiles_cache),
+                    "chats": dict(self._chats_cache),
+                }
                 self._cache_dirty = False
 
             if HAS_ZWYLIB and self._json_cache_file is not None:
@@ -1154,40 +1430,52 @@ class Plugin(BasePlugin):
 
     def _load_local_profiles_cache(self):
         try:
+            data = None
             if HAS_ZWYLIB and self._json_cache_file is not None:
-                self._json_cache_file.read()
-                cnt = self._json_cache_file.content
-                if isinstance(cnt, dict) and cnt:
-                    with self._sync_lock:
-                        for uid_str, p_data in cnt.items():
-                            if str(uid_str).isdigit():
-                                self._profiles_cache[int(uid_str)] = p_data
-                    self._update_snapshot()
-                    return
+                try:
+                    self._json_cache_file.read()
+                    data = self._json_cache_file.content
+                except Exception:
+                    data = None
 
-            import os
-            cache_path = "sync_profiles_cache.json"
-            if os.path.exists(cache_path):
-                with open(cache_path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, dict):
-                        with self._sync_lock:
-                            for uid_str, p_data in data.items():
+            if not isinstance(data, dict):
+                import os
+                cache_path = "sync_profiles_cache.json"
+                if os.path.exists(cache_path):
+                    try:
+                        with open(cache_path, "r", encoding="utf-8") as f:
+                            data = json.load(f)
+                    except Exception:
+                        data = None
+
+            if not isinstance(data, dict):
+                saved_str = self.get_setting("_local_profiles_json", "{}")
+                if saved_str and saved_str != "{}":
+                    try:
+                        data = json.loads(saved_str)
+                    except Exception:
+                        data = None
+
+            if isinstance(data, dict):
+                with self._sync_lock:
+                    if "profiles" in data or "chats" in data:
+                        p_map = data.get("profiles", {})
+                        if isinstance(p_map, dict):
+                            for uid_str, p_data in p_map.items():
                                 if str(uid_str).isdigit():
                                     self._profiles_cache[int(uid_str)] = p_data
-                        self._update_snapshot()
-                        return
-
-            saved_str = self.get_setting("_local_profiles_json", "{}")
-            if saved_str and saved_str != "{}":
-                saved_dict = json.loads(saved_str)
-                with self._sync_lock:
-                    for uid_str, p_data in saved_dict.items():
-                        if str(uid_str).isdigit():
-                            self._profiles_cache[int(uid_str)] = p_data
+                        c_map = data.get("chats", {})
+                        if isinstance(c_map, dict):
+                            for cid_str, c_data in c_map.items():
+                                cid_norm = _normalize_chat_id(cid_str)
+                                if cid_norm > 0:
+                                    self._chats_cache[cid_norm] = c_data
+                    else:
+                        # Legacy flat dict
+                        for uid_str, p_data in data.items():
+                            if str(uid_str).isdigit():
+                                self._profiles_cache[int(uid_str)] = p_data
                 self._update_snapshot()
-                self._save_local_profiles_cache(force=True)
-                self.set_setting("_local_profiles_json", "{}", reload_settings=False)
         except Exception as e:
             logger.error(f"Load cache error: {e}")
 
@@ -1287,6 +1575,10 @@ class Plugin(BasePlugin):
         elif "user_id" in kwargs:
             try: user_id = int(kwargs["user_id"])
             except Exception: pass
+        elif "userId" in kwargs:
+            try: user_id = int(kwargs["userId"])
+            except Exception: pass
+
         if not user and not user_id and args:
             for arg in args:
                 if isinstance(arg, dict):
@@ -1294,17 +1586,363 @@ class Plugin(BasePlugin):
                     if not user and "user_id" in arg:
                         try: user_id = int(arg["user_id"])
                         except Exception: pass
+                    if not user and "userId" in arg:
+                        try: user_id = int(arg["userId"])
+                        except Exception: pass
                     if user or user_id:
                         break
                 elif isinstance(arg, int) and arg > 0:
                     user_id = arg
                     break
-                elif hasattr(arg, "id") and not hasattr(arg, "getParentActivity"):
+                elif hasattr(arg, "id") and not hasattr(arg, "getParentActivity") and not hasattr(arg, "findViewById"):
                     user = arg
                     break
+                elif hasattr(arg, "getUser"):
+                    try:
+                        u = arg.getUser()
+                        if u:
+                            user = u
+                            break
+                    except Exception:
+                        pass
+
+        if not user and not user_id:
+            try:
+                from org.telegram.ui import LaunchActivity
+                frag = None
+                if hasattr(LaunchActivity, "getLastFragment"):
+                    frag = LaunchActivity.getLastFragment()
+                if frag and hasattr(frag, "getUser"):
+                    try: user = frag.getUser()
+                    except Exception: pass
+                if not user and frag and hasattr(frag, "getCurrentUser"):
+                    try: user = frag.getCurrentUser()
+                    except Exception: pass
+                if not user and frag and hasattr(frag, "user_id"):
+                    try: user_id = int(getattr(frag, "user_id", 0) or 0)
+                    except Exception: pass
+                if not user and frag and hasattr(frag, "userId"):
+                    try: user_id = int(getattr(frag, "userId", 0) or 0)
+                    except Exception: pass
+            except Exception:
+                pass
+
         if user and not user_id:
             user_id = int(getattr(user, "id", 0) or 0)
         return user, user_id
+
+    def _resolve_message_object(self, obj: Any, depth: int = 0) -> Any:
+        if obj is None or depth > 4:
+            return None
+
+        # Direct MessageObject (has messageOwner or (has entities and media))
+        if hasattr(obj, "messageOwner") and (
+            hasattr(obj, "getId") or hasattr(obj, "getDialogId") or hasattr(obj, "messageText") or hasattr(obj, "caption") or hasattr(obj, "messageOwner")
+        ):
+            return obj
+
+        # ChatMessageCell or any object with getMessageObject()
+        if hasattr(obj, "getMessageObject"):
+            try:
+                mo = obj.getMessageObject()
+                if mo is not None:
+                    return mo
+            except Exception:
+                pass
+
+        # ChatActionCell or view with currentMessageObject or messageObject
+        if hasattr(obj, "currentMessageObject"):
+            val = getattr(obj, "currentMessageObject", None)
+            if val is not None:
+                return val
+        if hasattr(obj, "messageObject"):
+            val = getattr(obj, "messageObject", None)
+            if val is not None:
+                return val
+
+        # Fragment / ChatActivity with selectedObject or getSelectedObject()
+        if hasattr(obj, "selectedObject"):
+            val = getattr(obj, "selectedObject", None)
+            if val is not None:
+                return val
+        if hasattr(obj, "getSelectedObject"):
+            try:
+                val = obj.getSelectedObject()
+                if val is not None:
+                    return val
+            except Exception:
+                pass
+        if hasattr(obj, "contextMenuMessageObject"):
+            val = getattr(obj, "contextMenuMessageObject", None)
+            if val is not None:
+                return val
+        if hasattr(obj, "selectedMessage"):
+            val = getattr(obj, "selectedMessage", None)
+            if val is not None:
+                return val
+
+        # ChatActivity selectedObjects map / collection
+        if hasattr(obj, "selectedObjects"):
+            so = getattr(obj, "selectedObjects", None)
+            if so is not None:
+                if isinstance(so, dict):
+                    for v in so.values():
+                        res = self._resolve_message_object(v, depth + 1)
+                        if res is not None:
+                            return res
+                elif hasattr(so, "values"):
+                    try:
+                        vals = so.values()
+                        arr = vals.toArray() if hasattr(vals, "toArray") else list(vals)
+                        for v in arr:
+                            res = self._resolve_message_object(v, depth + 1)
+                            if res is not None:
+                                return res
+                    except Exception:
+                        pass
+
+        # TLRPC.Message / TL_message (has id, and entities or media or message)
+        if hasattr(obj, "id") and (hasattr(obj, "entities") or hasattr(obj, "media") or hasattr(obj, "message")):
+            return obj
+
+        # Dict unwrapping
+        if isinstance(obj, dict):
+            for k in ("message", "messageObject", "message_object", "msg", "cell", "fragment", "selectedObject", "obj", "object", "item"):
+                if k in obj and obj[k] is not None:
+                    res = self._resolve_message_object(obj[k], depth + 1)
+                    if res is not None:
+                        return res
+            for v in obj.values():
+                res = self._resolve_message_object(v, depth + 1)
+                if res is not None:
+                    return res
+
+        # List / tuple / TL_vector unwrapping
+        if isinstance(obj, (list, tuple)):
+            for item in obj:
+                res = self._resolve_message_object(item, depth + 1)
+                if res is not None:
+                    return res
+
+        # Android View: getTag()
+        if hasattr(obj, "getTag"):
+            try:
+                tag = obj.getTag()
+                if tag is not None and tag != obj:
+                    res = self._resolve_message_object(tag, depth + 1)
+                    if res is not None:
+                        return res
+            except Exception:
+                pass
+
+        # Android View: getContext() -> LaunchActivity / ChatActivity
+        if hasattr(obj, "getContext"):
+            try:
+                ctx = obj.getContext()
+                if ctx is not None:
+                    if hasattr(ctx, "getActionBarLayout"):
+                        abl = ctx.getActionBarLayout()
+                        if abl and hasattr(abl, "getLastFragment"):
+                            res = self._resolve_message_object(abl.getLastFragment(), depth + 1)
+                            if res is not None:
+                                return res
+                    res = self._resolve_message_object(ctx, depth + 1)
+                    if res is not None:
+                        return res
+            except Exception:
+                pass
+
+        return None
+
+    def _extract_message_from_menu_args(self, *args, **kwargs) -> Any:
+        # 1. Check keyword arguments
+        for k in (
+            "message", "messageObject", "message_object", "msg", "cell", "view",
+            "fragment", "dialog", "chatActivity", "chat_activity", "selectedObject",
+            "selected_object", "obj", "object", "item"
+        ):
+            if k in kwargs and kwargs[k] is not None:
+                mo = self._resolve_message_object(kwargs[k])
+                if mo is not None:
+                    return mo
+
+        # 2. Check positional arguments
+        if args:
+            for arg in args:
+                mo = self._resolve_message_object(arg)
+                if mo is not None:
+                    return mo
+
+        # 3. Check tracked last selected message from cell/activity hooks
+        if hasattr(self, "_last_selected_message") and self._last_selected_message is not None:
+            mo = self._resolve_message_object(self._last_selected_message)
+            if mo is not None:
+                return mo
+
+        # 4. Check active ChatActivity / LaunchActivity
+        try:
+            from org.telegram.ui import LaunchActivity
+            frag = None
+            if hasattr(LaunchActivity, "getLastFragment"):
+                frag = LaunchActivity.getLastFragment()
+            if not frag and hasattr(LaunchActivity, "visibleFragments"):
+                vf = LaunchActivity.visibleFragments
+                if vf:
+                    cnt = vf.size() if hasattr(vf, "size") else len(vf)
+                    if cnt > 0:
+                        frag = vf.get(cnt - 1) if hasattr(vf, "get") else vf[-1]
+            if frag is not None:
+                mo = self._resolve_message_object(frag)
+                if mo is not None:
+                    return mo
+        except Exception:
+            pass
+
+        return None
+
+    def _extract_custom_emoji_ids(self, message: Any) -> List[int]:
+        found_ids: List[int] = []
+        if message is None:
+            return found_ids
+
+        def _add_id(val: Any):
+            if val is None:
+                return
+            safe = _safe_int(val, 0)
+            if safe > 0 and safe not in found_ids:
+                found_ids.append(safe)
+
+        # 1. MessageOwner & entities list
+        msg_owner = getattr(message, "messageOwner", None) or message
+
+        def _scan_entities(entities: Any):
+            if not entities:
+                return
+            cnt = entities.size() if hasattr(entities, "size") else len(entities)
+            for i in range(cnt):
+                entity = entities.get(i) if hasattr(entities, "get") else entities[i]
+                if entity is None:
+                    continue
+                # TL_messageEntityCustomEmoji document_id / documentId
+                doc_id = getattr(entity, "document_id", None) or getattr(entity, "documentId", None)
+                if doc_id is not None:
+                    _add_id(doc_id)
+                elif hasattr(entity, "document") and entity.document:
+                    _add_id(getattr(entity.document, "id", None))
+
+        if hasattr(msg_owner, "entities"):
+            _scan_entities(msg_owner.entities)
+        if hasattr(message, "entities") and message != msg_owner:
+            _scan_entities(message.entities)
+        if hasattr(message, "captionEntities"):
+            _scan_entities(message.captionEntities)
+        if hasattr(msg_owner, "captionEntities"):
+            _scan_entities(msg_owner.captionEntities)
+
+        # 2. Spannable text (messageText, caption, text)
+        for text_field in ("messageText", "caption", "text"):
+            text_obj = getattr(message, text_field, None) or getattr(msg_owner, text_field, None)
+            if text_obj is not None:
+                if hasattr(text_obj, "getSpans"):
+                    try:
+                        t_len = text_obj.length() if hasattr(text_obj, "length") else len(text_obj)
+                        spans = None
+                        try:
+                            spans = text_obj.getSpans(0, t_len, None)
+                        except Exception:
+                            try:
+                                from java.lang import Object as JObject
+                                spans = text_obj.getSpans(0, t_len, JObject)
+                            except Exception:
+                                pass
+                        if spans is not None:
+                            s_cnt = spans.size() if hasattr(spans, "size") else len(spans)
+                            for i in range(s_cnt):
+                                span = spans.get(i) if hasattr(spans, "get") else spans[i]
+                                if span is None:
+                                    continue
+                                d_id = (
+                                    getattr(span, "documentId", None)
+                                    or getattr(span, "document_id", None)
+                                    or getattr(span, "docId", None)
+                                )
+                                if d_id is None and hasattr(span, "getDocumentId"):
+                                    try: d_id = span.getDocumentId()
+                                    except Exception: pass
+                                if d_id is None and hasattr(span, "document"):
+                                    doc_obj = getattr(span, "document", None)
+                                    if doc_obj:
+                                        d_id = getattr(doc_obj, "id", None)
+                                if d_id is not None:
+                                    _add_id(d_id)
+                    except Exception:
+                        pass
+
+                # Regex search in string representation (tg://emoji?id=..., document_id=...)
+                try:
+                    import re
+                    s_text = str(text_obj)
+                    for m in re.finditer(r'(?:emoji[_-]?id|document[_-]?id)[=":\s]+(\d{10,20})', s_text, re.IGNORECASE):
+                        _add_id(m.group(1))
+                    for m in re.finditer(r'tg://emoji\?id=(\d{10,20})', s_text, re.IGNORECASE):
+                        _add_id(m.group(1))
+                except Exception:
+                    pass
+
+        # 3. Media / Sticker / Custom Emoji Document (media.document)
+        media_obj = getattr(msg_owner, "media", None) or getattr(message, "media", None)
+        if media_obj is not None:
+            # TL_messageMediaDocument
+            doc = getattr(media_obj, "document", None)
+            if doc is not None:
+                _add_id(getattr(doc, "id", None))
+            # TL_messageMediaPaidMedia
+            extended_media = getattr(media_obj, "extended_media", None)
+            if extended_media:
+                em_cnt = extended_media.size() if hasattr(extended_media, "size") else len(extended_media)
+                for i in range(em_cnt):
+                    em = extended_media.get(i) if hasattr(extended_media, "get") else extended_media[i]
+                    em_doc = getattr(em, "document", None)
+                    if em_doc:
+                        _add_id(getattr(em_doc, "id", None))
+
+        if hasattr(message, "getDocument"):
+            try:
+                doc = message.getDocument()
+                if doc and hasattr(doc, "id"):
+                    _add_id(doc.id)
+            except Exception:
+                pass
+
+        # 4. Reactions
+        reactions = getattr(msg_owner, "reactions", None) or getattr(message, "reactions", None)
+        if reactions and hasattr(reactions, "results"):
+            results = reactions.results
+            r_cnt = results.size() if hasattr(results, "size") else len(results)
+            for i in range(r_cnt):
+                res = results.get(i) if hasattr(results, "get") else results[i]
+                reaction = getattr(res, "reaction", None)
+                if reaction:
+                    _add_id(getattr(reaction, "document_id", None) or getattr(reaction, "documentId", None))
+
+        # 5. Check replyMessageObject if nothing found yet
+        if not found_ids and hasattr(message, "replyMessageObject"):
+            reply_mo = getattr(message, "replyMessageObject", None)
+            if reply_mo and reply_mo != message:
+                reply_ids = self._extract_custom_emoji_ids(reply_mo)
+                for rid in reply_ids:
+                    _add_id(rid)
+
+        # 6. Fallback: Sender user emoji status
+        if not found_ids:
+            try:
+                from_user = getattr(message, "fromUser", None) or getattr(msg_owner, "from_id", None)
+                if from_user and hasattr(from_user, "emoji_status") and from_user.emoji_status:
+                    _add_id(getattr(from_user.emoji_status, "document_id", None))
+            except Exception:
+                pass
+
+        return found_ids
 
     def _on_refresh_single_profile_click(self, *args, **kwargs):
         user, user_id = self._extract_user_from_menu_args(*args, **kwargs)
@@ -1368,61 +2006,55 @@ class Plugin(BasePlugin):
             bulletins.show_info(f"Пользователь {user_id} не найден в локальной базе.")
 
     def _on_copy_emoji_id_click(self, *args, **kwargs):
-        message = None
-        if "message" in kwargs:
-            message = kwargs["message"]
-        elif args:
-            for arg in args:
-                if isinstance(arg, dict) and "message" in arg:
-                    message = arg["message"]
-                    break
-                elif hasattr(arg, "messageOwner") or hasattr(arg, "entities"):
-                    message = arg
-                    break
+        message = self._extract_message_from_menu_args(*args, **kwargs)
         if not message:
             bulletins.show_error("Сообщение не найдено.")
             return
 
-        doc_ids = []
-        try:
-            msg_owner = getattr(message, "messageOwner", None) or message
-            if msg_owner and hasattr(msg_owner, "entities"):
-                entities = msg_owner.entities
-                if entities:
-                    cnt = entities.size() if hasattr(entities, "size") else len(entities)
-                    for i in range(cnt):
-                        entity = entities.get(i) if hasattr(entities, "get") else entities[i]
-                        doc_id = getattr(entity, "document_id", None)
-                        if doc_id:
-                            doc_ids.append(str(doc_id))
-        except Exception:
-            pass
+        doc_ids = self._extract_custom_emoji_ids(message)
 
         if doc_ids:
-            found_id = doc_ids[0]
-            self._copy_text_to_clipboard(found_id, f"Emoji ID скопирован: {found_id}")
+            found_id = str(doc_ids[0])
+            if len(doc_ids) == 1:
+                self._copy_text_to_clipboard(found_id, f"🆔 Emoji ID скопирован:\n{found_id}")
+            else:
+                all_ids_str = ", ".join(str(d) for d in doc_ids)
+                self._copy_text_to_clipboard(
+                    found_id,
+                    f"🆔 Скопирован 1-й Emoji ID: {found_id}\n(Найдено {len(doc_ids)}: {all_ids_str})"
+                )
         else:
             bulletins.show_info("В этом сообщении не найдено кастомных эмодзи.")
 
     def _copy_text_to_clipboard(self, text: str, success_msg: str = ""):
+        if not text:
+            return
         try:
             from org.telegram.messenger import AndroidUtilities
             AndroidUtilities.addToClipboard(text)
             if not success_msg:
                 success_msg = f"Скопировано: {text}"
             bulletins.show_with_copy("Скопировано", text)
+            return
         except Exception:
-            try:
-                from android.content import Context, ClipData
-                from org.telegram.messenger import ApplicationLoader
-                ctx = getattr(ApplicationLoader, "applicationContext", None)
-                if ctx:
-                    cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
-                    clip = ClipData.newPlainText("text", text)
-                    cm.setPrimaryClip(clip)
-            except Exception:
-                pass
-            bulletins.show_info(f"Скопировано: {text}")
+            pass
+
+        try:
+            from android.content import Context, ClipData
+            from org.telegram.messenger import ApplicationLoader
+            ctx = getattr(ApplicationLoader, "applicationContext", None)
+            if ctx:
+                cm = ctx.getSystemService(Context.CLIPBOARD_SERVICE)
+                clip = ClipData.newPlainText("text", text)
+                cm.setPrimaryClip(clip)
+                if not success_msg:
+                    success_msg = f"Скопировано: {text}"
+                bulletins.show_with_copy("Скопировано", text)
+                return
+        except Exception:
+            pass
+
+        bulletins.show_info(f"Скопировано: {text}")
 
     def create_settings(self) -> List[Any]:
         with self._sync_lock:

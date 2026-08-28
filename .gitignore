@@ -24,3 +24,8 @@ sync (SUCCESS)*.plugin
 Thumbs.db
 .vscode/
 .idea/
+*.code-workspace
+analysis.md
+crash.md
+sync_profiles_cache.json
+

@@ -39,7 +39,8 @@
 
 ## 📦 Релизы и загрузки
 
-Все готовые к установке файлы доступны на странице [**Releases**](https://github.com/Kukuryzen666/SyncProfile/releases/latest).
+- Все готовые к установке файлы доступны на странице [**Releases**](https://github.com/Kukuryzen666/SyncProfile/releases/latest).
+- Подробная история изменений доступна в [**CHANGELOG.md**](https://github.com/Kukuryzen666/SyncProfile/blob/main/CHANGELOG.md).
 
 ---
 
