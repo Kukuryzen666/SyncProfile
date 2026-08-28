@@ -81,7 +81,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.27"
+__version__ = "10.2.28"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -257,6 +257,7 @@ class Plugin(BasePlugin):
         self._is_running = True
         self._load_local_profiles_cache()
         self._auto_import_from_official_tg_premium()
+        self._ensure_local_premium()
 
         # Seed local profile cache with own active accounts
         active_accs = self._get_active_accounts_data()
@@ -291,6 +292,20 @@ class Plugin(BasePlugin):
         self._unregister_xposed_hooks()
         self._save_local_profiles_cache(force=True)
         logger.info(f"SyncProfile v{__version__}: Выгружен.")
+
+    def _ensure_local_premium(self):
+        """Silently enables AyuGram localPremium so the client correctly sends
+        TL_messageEntityCustomEmoji even through scheduled messages (отложка)."""
+        try:
+            from com.radolyn.ayugram import AyuConfig
+            if hasattr(AyuConfig, "localPremium") and not AyuConfig.localPremium:
+                AyuConfig.localPremium = True
+                if hasattr(AyuConfig, "saveConfig"):
+                    AyuConfig.saveConfig()
+                elif hasattr(AyuConfig, "save"):
+                    AyuConfig.save()
+        except Exception:
+            pass
 
     def _auto_import_from_official_tg_premium(self):
         imported_any = False
@@ -534,6 +549,22 @@ class Plugin(BasePlugin):
         if not _is_user(u):
             return False
 
+        # Normalize video avatar flags so all accounts see animated avatars
+        try:
+            ph = getattr(u, "photo", None)
+            if ph:
+                v_sizes = getattr(ph, "video_sizes", None)
+                has_v = bool(
+                    getattr(ph, "has_video", False)
+                    or (v_sizes and (hasattr(v_sizes, "isEmpty") and not v_sizes.isEmpty() or len(v_sizes) > 0))
+                    or ((int(getattr(ph, "flags", 0) or 0) & 1) != 0)
+                )
+                if has_v:
+                    ph.has_video = True
+                    ph.flags = int(getattr(ph, "flags", 0) | 1)
+        except Exception:
+            pass
+
         # Lock-free hot-path: check snapshot first, fallback to live cache
         snap = self._profiles_snapshot
         profile = snap.get(uid) if snap else None
@@ -569,12 +600,10 @@ class Plugin(BasePlugin):
                 st.document_id = em_id
                 u.emoji_status = st
 
-            # Do NOT set u.premium for own active accounts to prevent UserConfig flip-flops
-            my_uids = self._get_my_active_uids()
-            if uid not in my_uids:
-                is_prem = bool(profile.get("premium", True))
-                if is_prem:
-                    u.premium = True
+            # Always set premium for all users (including own accounts)
+            # so video avatars, emoji statuses and custom emoji are visible everywhere
+            if bool(profile.get("premium", True)):
+                u.premium = True
 
             return True
         except Exception:
@@ -655,7 +684,43 @@ class Plugin(BasePlugin):
                     except Exception as e:
                         log(f"SyncProfile: hook MessagesController method {m} error: {e}")
 
-            log(f"SyncProfile: Установлено {len(self._xposed_unhooks)} чистых TL-хуков.")
+            # Hook UserObject.hasAnimatedAvatar so video avatars always play
+            UserObjectClass = find_class("org.telegram.messenger.UserObject")
+            if UserObjectClass:
+                class UserHasAnimatedAvatarHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            if param.getResult():
+                                return
+                            args = getattr(param, "args", None)
+                            if not args or len(args) == 0:
+                                return
+                            ph = getattr(args[0], "photo", None)
+                            if not ph:
+                                return
+                            v_sizes = getattr(ph, "video_sizes", None)
+                            has_v = bool(
+                                getattr(ph, "has_video", False)
+                                or (v_sizes and (hasattr(v_sizes, "isEmpty") and not v_sizes.isEmpty() or len(v_sizes) > 0))
+                                or ((int(getattr(ph, "flags", 0) or 0) & 1) != 0)
+                            )
+                            if has_v:
+                                ph.has_video = True
+                                param.setResult(True)
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(UserObjectClass):
+                    try:
+                        if m.getName() in ("hasAnimatedAvatar", "canAnimateAvatar"):
+                            m.setAccessible(True)
+                            un = self.hook_method(m, UserHasAnimatedAvatarHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception:
+                        pass
+
+            log(f"SyncProfile: Установлено {len(self._xposed_unhooks)} хуков.")
         except Exception as e:
             log(f"SyncProfile: Ошибка регистрации хуков: {e}")
 
