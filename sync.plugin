@@ -81,7 +81,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.34"
+__version__ = "10.2.35"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -252,13 +252,25 @@ def _get_class_methods(cls_obj: Any) -> List[Any]:
             pass
     return []
 
-def _build_peer_color(color_id: Any, bg_emoji_id: Any = None):
+# Кэш TL_peerColor объектов: (color_id, bg_emoji_id) → TL_peerColor.
+# Избегает создание новых Java-объектов на каждый getUser() вызов при прокрутке.
+# TG читает значения int-полей и не модифицирует их — обмен безопасен.
+_peer_color_cache: Dict[Any, Any] = {}
+# Кэш TL_emojiStatus объектов: document_id → TL_emojiStatus.
+_emoji_status_cache: Dict[int, Any] = {}
+
+def _build_peer_color(color_id: Any, bg_emoji_id: Any):
     if color_id is None:
         return None
     c = _safe_int(color_id, -1)
     if c < 0:
         return None
     bg = _safe_int(bg_emoji_id, 0)
+    
+    cache_key = (c, bg)
+    if cache_key in _peer_color_cache:
+        return _peer_color_cache[cache_key]
+        
     try:
         global TLRPC
         if TLRPC is None:
@@ -287,15 +299,20 @@ class Plugin(BasePlugin):
         self._chats_snapshot: Dict[int, Dict[str, Any]] = {}
         self._cache_dirty = False
         self._is_running = True
+        self._stop_event = threading.Event()
         self._xposed_unhooks: List[Any] = []
         self._json_cache_file = None
         self._last_selected_message: Optional[Any] = None
 
         # ── Оптимизация: кэши hot-path ──────────────────────────────
         # UIDs с уже нормализованными флагами видеоаватара.
-        # Не используем patch_cache: Telegram создаёт новые Java-объекты
-        # при каждом обновлении из сети/БД — кэш по uid несовместим с этим.
         self._video_avatar_uids: set = set()
+        # UIDs/chat_ids для которых видео-проверка уже была выполнена (с видео или без).
+        # Без этого JVM-рефлексия через hasattr/isEmpty запускалась на КАЖДОМ getUser()
+        # при прокрутке — главная причина лагов в exteraGram.
+        self._video_checked_uids: set = set()
+        self._video_checked_chat_ids: set = set()
+        self._patch_cache: Dict[int, Any] = {}
 
         if HAS_ZWYLIB:
             try:
@@ -343,6 +360,7 @@ class Plugin(BasePlugin):
 
     def on_plugin_unload(self):
         self._is_running = False
+        self._stop_event.set()
         if HAS_ZWYLIB:
             try:
                 async_manager.cancel_all_for(__id__)
@@ -658,8 +676,11 @@ class Plugin(BasePlugin):
         if not _is_user(u):
             return False
 
-        # Нормализация флагов видеоаватара — только если ещё не делали для этого uid.
-        if uid not in self._video_avatar_uids:
+        # Нормализация видеоаватара — ровно один раз на uid.
+        # Без _video_checked_uids проверка запускалась на каждом getUser()
+        # для пользователей БЕЗ видео — холостая JVM-рефлексия при прокрутке.
+        if uid not in self._video_checked_uids:
+            self._video_checked_uids.add(uid)
             try:
                 ph = getattr(u, "photo", None)
                 if ph:
@@ -687,11 +708,28 @@ class Plugin(BasePlugin):
             return False
 
         try:
-            nc = _safe_int(profile.get("name_color", 0))
-            nbg = _safe_int(profile.get("name_bg_emoji_id", 0))
-            prc = _safe_int(profile.get("profile_color", 0))
-            pbg = _safe_int(profile.get("profile_bg_emoji_id", 0))
+            nc    = _safe_int(profile.get("name_color", 0))
+            nbg   = _safe_int(profile.get("name_bg_emoji_id", 0))
+            prc   = _safe_int(profile.get("profile_color", 0))
+            pbg   = _safe_int(profile.get("profile_bg_emoji_id", 0))
             em_id = _safe_int(profile.get("emoji_status_id", 0))
+            prem  = bool(profile.get("premium", True))
+
+            # Ранний выход: если объект уже полностью патчен нужными значениями —
+            # не создаём новые Java-объекты, не делаем присваиваний.
+            # Это главный источник GC-давления при прокрутке чатов.
+            existing_color = getattr(u, "color", None)
+            if existing_color is not None:
+                try:
+                    if (int(getattr(existing_color, "color", -1)) == nc
+                            and int(getattr(existing_color, "background_emoji_id", 0)) == nbg):
+                        # Цвет имени уже выставлен правильно.
+                        # Достаточно только обновить premium.
+                        if prem:
+                            u.premium = True
+                        return True
+                except Exception:
+                    pass
 
             pc_obj = _build_peer_color(nc, nbg)
             if pc_obj is not None:
@@ -702,14 +740,18 @@ class Plugin(BasePlugin):
                 u.profile_color = prc_obj
 
             if em_id != 0 and TLRPC is not None:
-                st = TLRPC.TL_emojiStatus()
-                try:
-                    st.document_id = long(em_id)
-                except Exception:
-                    st.document_id = em_id
+                # Кэшируем TL_emojiStatus по document_id
+                st = _emoji_status_cache.get(em_id)
+                if st is None:
+                    st = TLRPC.TL_emojiStatus()
+                    try:
+                        st.document_id = long(em_id)
+                    except Exception:
+                        st.document_id = em_id
+                    _emoji_status_cache[em_id] = st
                 u.emoji_status = st
 
-            if bool(profile.get("premium", True)):
+            if prem:
                 u.premium = True
 
             return True
@@ -761,21 +803,23 @@ class Plugin(BasePlugin):
         if not _is_chat(chat):
             return False
 
-        # Normalize video avatar flags
-        try:
-            ph = getattr(chat, "photo", None)
-            if ph:
-                v_sizes = getattr(ph, "video_sizes", None)
-                has_v = bool(
-                    getattr(ph, "has_video", False)
-                    or (v_sizes and (hasattr(v_sizes, "isEmpty") and not v_sizes.isEmpty() or len(v_sizes) > 0))
-                    or ((int(getattr(ph, "flags", 0) or 0) & 1) != 0)
-                )
-                if has_v:
-                    ph.has_video = True
-                    ph.flags = int(getattr(ph, "flags", 0) | 1)
-        except Exception:
-            pass
+        # Нормализация видеоаватара — один раз на cid, а не на каждом scroll-кадре.
+        if cid not in self._video_checked_chat_ids:
+            self._video_checked_chat_ids.add(cid)
+            try:
+                ph = getattr(chat, "photo", None)
+                if ph:
+                    v_sizes = getattr(ph, "video_sizes", None)
+                    has_v = bool(
+                        getattr(ph, "has_video", False)
+                        or (v_sizes and (hasattr(v_sizes, "isEmpty") and not v_sizes.isEmpty() or len(v_sizes) > 0))
+                        or ((int(getattr(ph, "flags", 0) or 0) & 1) != 0)
+                    )
+                    if has_v:
+                        ph.has_video = True
+                        ph.flags = int(getattr(ph, "flags", 0) | 1)
+            except Exception:
+                pass
 
         snap = getattr(self, "_chats_snapshot", None)
         profile = snap.get(cid) if snap else None
@@ -787,17 +831,21 @@ class Plugin(BasePlugin):
             return False
 
         try:
-            global TLRPC
-            if TLRPC is None:
-                from org.telegram.tgnet import TLRPC as _TLRPC
-                TLRPC = _TLRPC
-
-            nc = _safe_int(profile.get("name_color", 0))
-            nbg = _safe_int(profile.get("name_bg_emoji_id", 0))
-            prc = _safe_int(profile.get("profile_color", 0))
-            pbg = _safe_int(profile.get("profile_bg_emoji_id", 0))
-            em_id = _safe_int(profile.get("emoji_status_id", 0))
+            nc       = _safe_int(profile.get("name_color", 0))
+            nbg      = _safe_int(profile.get("name_bg_emoji_id", 0))
+            prc      = _safe_int(profile.get("profile_color", 0))
+            pbg      = _safe_int(profile.get("profile_bg_emoji_id", 0))
+            em_id    = _safe_int(profile.get("emoji_status_id", 0))
             boost_lvl = _safe_int(profile.get("boost_level", 0))
+
+            # Ранний выход: цвет уже выставлен
+            existing_color = getattr(chat, "color", None)
+            if existing_color is not None:
+                try:
+                    if int(getattr(existing_color, "color", -1)) == nc:
+                        return True
+                except Exception:
+                    pass
 
             pc_obj = _build_peer_color(nc, nbg)
             if pc_obj is not None:
@@ -807,12 +855,15 @@ class Plugin(BasePlugin):
             if prc_obj is not None:
                 chat.profile_color = prc_obj
 
-            if em_id != 0:
-                st = TLRPC.TL_emojiStatus()
-                try:
-                    st.document_id = long(em_id)
-                except Exception:
-                    st.document_id = em_id
+            if em_id != 0 and TLRPC is not None:
+                st = _emoji_status_cache.get(em_id)
+                if st is None:
+                    st = TLRPC.TL_emojiStatus()
+                    try:
+                        st.document_id = long(em_id)
+                    except Exception:
+                        st.document_id = em_id
+                    _emoji_status_cache[em_id] = st
                 chat.emoji_status = st
 
             if boost_lvl > 0:
@@ -953,6 +1004,22 @@ class Plugin(BasePlugin):
         c = int(color_id) if color_id is not None else 0
         # name colors 0-6 map the same as profile colors 0-6
         return PROFILE_COLOR_RGB_MAP.get(c % 7, PROFILE_COLOR_RGB_MAP[2])
+
+    @staticmethod
+    def _safe_get_user(mc: Any, uid: int) -> Any:
+        """Вызывает mc.getUser() с явным java.lang.Long чтобы избежать
+        ClassCastException (Long cannot be cast to Integer) в NotificationCenter.
+        Chaquopy выбирает перегрузку по типу аргумента: Python int → Long;
+        некоторые версии Telegram ожидают long-примитив, другие — Integer.
+        Передача Long явно гарантирует совместимость с long-перегрузкой."""
+        try:
+            from java.lang import Long as _JLong
+            return mc.getUser(_JLong(uid))
+        except Exception:
+            try:
+                return mc.getUser(uid)
+            except Exception:
+                return None
 
     # ─────────────────────────────────────────────────────────────────────────
 
@@ -1173,6 +1240,65 @@ class Plugin(BasePlugin):
                     except Exception as e:
                         log(f"SyncProfile: hook MessageObject.{m.getName()} error: {e}")
 
+            # ── Hook ProfileActivity: показывать bulletin если юзер в базе SyncProfile ──
+            ProfileActivityClass = find_class("org.telegram.ui.ProfileActivity")
+            if ProfileActivityClass:
+                class ProfileActivityResumeHook(MethodHook):
+                    def after_hooked_method(self_hook, param):
+                        try:
+                            this_frag = getattr(param, "thisObject", None)
+                            if not this_frag:
+                                return
+                            # Получаем user_id — разные версии хранят по-разному
+                            uid = 0
+                            for attr in ("user_id", "userId", "dialog_id", "dialogId"):
+                                val = getattr(this_frag, attr, None)
+                                if val:
+                                    try:
+                                        candidate = int(val)
+                                        if candidate > 0:
+                                            uid = candidate
+                                            break
+                                    except Exception:
+                                        pass
+                            if uid <= 0:
+                                try:
+                                    u = this_frag.getCurrentUser() if hasattr(this_frag, "getCurrentUser") else None
+                                    if u:
+                                        uid = int(getattr(u, "id", 0) or 0)
+                                except Exception:
+                                    pass
+                            if uid <= 0:
+                                return
+                            # Проверяем кэш
+                            snap = plugin_self._profiles_snapshot
+                            prof = snap.get(uid) if snap else None
+                            if prof is None:
+                                with plugin_self._sync_lock:
+                                    prof = plugin_self._profiles_cache.get(uid)
+                            if prof is not None:
+                                # Собственный аккаунт — не показываем
+                                my_uids = plugin_self._get_my_active_uids()
+                                if uid in my_uids:
+                                    return
+                                bulletins.show_info("✨ Этот пользователь использует SyncProfile")
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(ProfileActivityClass):
+                    try:
+                        m_name = m.getName()
+                        p_types = m.getParameterTypes()
+                        # onResume() — без параметров
+                        if m_name == "onResume" and len(p_types) == 0:
+                            m.setAccessible(True)
+                            un = self.hook_method(m, ProfileActivityResumeHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                            break
+                    except Exception:
+                        pass
+
             log(f"SyncProfile: Установлено {len(self._xposed_unhooks)} хуков.")
         except Exception as e:
             log(f"SyncProfile: Ошибка регистрации хуков: {e}")
@@ -1186,7 +1312,9 @@ class Plugin(BasePlugin):
         self._xposed_unhooks.clear()
 
     def _initial_background_sync(self):
-        time.sleep(1.0)
+        # 0.5s — достаточно чтобы UI успел отрисовать первый кадр,
+        # но намного меньше чем 1.0s чтобы snapshot был готов до первого getUser().
+        time.sleep(0.5)
         if not self._is_running:
             return
         if self.get_setting("enable_sync", True):
@@ -1197,7 +1325,7 @@ class Plugin(BasePlugin):
                 self.sync_delta_updates_from_server(show_bulletin=False)
 
     async def _async_initial_background_sync(self):
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.5)
         if not self._is_running:
             return
         if self.get_setting("enable_sync", True):
@@ -1208,9 +1336,12 @@ class Plugin(BasePlugin):
                 await self._async_sync_delta_updates(show_bulletin=False)
 
     def _keep_alive_sync_loop(self):
+        """Синхронный keep-alive loop. Использует threading.Event.wait() вместо
+        time.sleep() — немедленно прерывается при вызове on_plugin_unload."""
         while self._is_running:
-            time.sleep(60)
-            if not self._is_running:
+            # wait() возвращает True если event был set(), False по таймауту
+            stopped = self._stop_event.wait(timeout=60)
+            if stopped or not self._is_running:
                 break
             if self.get_setting("enable_sync", True):
                 self.sync_delta_updates_from_server(show_bulletin=False)
@@ -1265,6 +1396,8 @@ class Plugin(BasePlugin):
                             my_uids = self._get_my_active_uids()
                             preserved = {uid: p for uid, p in self._profiles_cache.items() if uid in my_uids}
                             self._profiles_cache = preserved
+                            # Также сбрасываем кэш чатов при полном обновлении
+                            self._chats_cache.clear()
 
                         for p in profiles_list:
                             uid = p.get("user_id")
@@ -1343,31 +1476,12 @@ class Plugin(BasePlugin):
                         self._save_local_profiles_cache()
                         updated_list = list(updated_ids)
 
-                        plugin_self = self
-                        def on_delta_applied(uids=updated_list):
-                            try:
-                                from org.telegram.messenger import MessagesController, UserConfig
-                                sel_acc = getattr(UserConfig, "selectedAccount", 0)
-                                mc = MessagesController.getInstance(sel_acc)
-                                if mc and uids:
-                                    for u_id in uids:
-                                        try:
-                                            # Явно передаём int (не Long), чтобы избежать
-                                            # ClassCastException в DialogsActivity.didReceivedNotification
-                                            # при возврате из чата (Long cannot be cast to Integer).
-                                            try:
-                                                from java.lang import Integer as _JInt
-                                                safe_id = _JInt(int(u_id) & 0x7FFFFFFF)
-                                            except Exception:
-                                                safe_id = int(u_id)
-                                            u_obj = mc.getUser(safe_id)
-                                            if u_obj and _is_user(u_obj):
-                                                plugin_self._patch_user_tl_object(u_obj)
-                                        except Exception:
-                                            pass
-                            except Exception:
-                                pass
-                        run_on_ui_thread(on_delta_applied)
+                        # Не вызываем mc.getUser() проактивно — это триггерит
+                        # NotificationCenter.postNotificationName() с Long uid,
+                        # что вызывает ClassCastException в DialogsActivity
+                        # и сбрасывает стек фрагментов (выбрасывает в «Все чаты»).
+                        # Хуки на getUser уже патчат объекты автоматически
+                        # при следующем естественном вызове getUser() от Telegram.
 
                         if show_bulletin:
                             bulletins.show_success(f"Получено {len(new_cache)} обновлений профилей!")
@@ -1392,9 +1506,12 @@ class Plugin(BasePlugin):
                 bulletins.show_error(f"Ошибка синхронизации: {e}")
 
     def _apply_all_to_all_accounts(self):
-        """Обновляет TL-объекты всех активных аккаунтов.
-        Тяжёлая работа (чтение настроек, сбор данных) — в background-потоке.
-        Лёгкая финальная часть (mc.getUser + поля) — на UI-потоке.
+        """Обновляет TL-объекты собственных аккаунтов (цвет, premium, эмодзи).
+        Тяжёлая работа (чтение настроек) — в background-потоке.
+        UI-часть: только getCurrentUser() + прямая запись полей.
+        mc.getUser() не вызывается — он триггерит NotificationCenter с Long uid
+        что ломает DialogsActivity и выбрасывает в «Все чаты».
+        Хуки на getUser автоматически патчат остальных пользователей.
         """
         plugin_self = self
 
@@ -1459,16 +1576,6 @@ class Plugin(BasePlugin):
                             except Exception:
                                 pass
 
-                        mc = MessagesController.getInstance(sel_acc)
-                        if mc:
-                            for _, uid2, *_ in patches:
-                                if uid2 > 0:
-                                    try:
-                                        u_obj2 = mc.getUser(uid2)
-                                        if u_obj2 and _is_user(u_obj2):
-                                            plugin_self._patch_user_tl_object(u_obj2)
-                                    except Exception:
-                                        pass
                     except Exception as e:
                         log(f"SyncProfile: _apply_all ui_apply error: {e}")
 
@@ -1678,25 +1785,13 @@ class Plugin(BasePlugin):
             logger.error(f"Load cache error: {e}")
 
     def _register_menu_items(self):
+        # Кнопки в контекстном меню профиля (рефреш и инфо) удалены —
+        # SDK не передаёт правильный user в on_click для этого типа меню.
+        # Информация об использовании SyncProfile теперь показывается
+        # автоматически через ProfileActivity.onResume хук.
         try:
             if not hasattr(self, "add_menu_item") or MenuItemType is None or MenuItemData is None:
                 return
-
-            profile_menu_type = None
-            if hasattr(MenuItemType, "__members__") and isinstance(MenuItemType.__members__, dict):
-                for name in ("PROFILE_ACTION_MENU", "PROFILE_MENU", "USER_ACTION_MENU", "USER_PROFILE", "PROFILE"):
-                    if name in MenuItemType.__members__:
-                        profile_menu_type = MenuItemType.__members__[name]
-                        break
-            if profile_menu_type is None:
-                for name in ("PROFILE_ACTION_MENU", "PROFILE_MENU", "USER_ACTION_MENU", "USER_PROFILE", "PROFILE"):
-                    try:
-                        val = getattr(MenuItemType, name, None)
-                        if val is not None:
-                            profile_menu_type = val
-                            break
-                    except Exception:
-                        pass
 
             msg_menu_type = None
             if hasattr(MenuItemType, "__members__") and isinstance(MenuItemType.__members__, dict):
@@ -1711,34 +1806,6 @@ class Plugin(BasePlugin):
                         if val is not None:
                             msg_menu_type = val
                             break
-                    except Exception:
-                        pass
-
-            if profile_menu_type is not None:
-                def _make_prof_item(item_id: str, text: str, icon: str, on_click: Any, priority: int = 100):
-                    for c in (
-                        lambda: MenuItemData(menu_type=profile_menu_type, text=text, on_click=on_click, icon=icon, priority=priority),
-                        lambda: MenuItemData(id=item_id, type=profile_menu_type, text=text, icon=icon, on_click=on_click),
-                        lambda: MenuItemData(menu_type=profile_menu_type, text=text, on_click=on_click, icon=icon),
-                        lambda: MenuItemData(type=profile_menu_type, text=text, icon=icon, on_click=on_click),
-                    ):
-                        try:
-                            return c()
-                        except Exception:
-                            continue
-                    return None
-
-                item1 = _make_prof_item("refresh_profile", "🔄 Обновить профиль (SyncProfile)", "msg_sync", self._on_refresh_single_profile_click, 110)
-                if item1:
-                    try:
-                        self.add_menu_item(item1)
-                    except Exception:
-                        pass
-
-                item2 = _make_prof_item("profile_info", "⭐ SyncProfile: Инфо о профиле", "msg_info", self._on_profile_menu_click, 100)
-                if item2:
-                    try:
-                        self.add_menu_item(item2)
                     except Exception:
                         pass
 
@@ -2414,6 +2481,7 @@ class Plugin(BasePlugin):
     def _clear_cache_action(self, view: Any = None):
         with self._sync_lock:
             self._profiles_cache.clear()
+            self._chats_cache.clear()
             self._cache_dirty = False
         if self._json_cache_file:
             try:
@@ -2423,4 +2491,16 @@ class Plugin(BasePlugin):
         self._update_snapshot()
         self._save_local_profiles_cache(force=True)
         self._apply_all_to_all_accounts()
-        bulletins.show_success("Локальный кэш SyncProfile очищен!")
+        bulletins.show_info("Кэш очищен — загружаю базу с сервера...")
+
+        # Сразу запускаем полное скачивание БД в фоне, чтобы профили
+        # отображались корректно без ручного нажатия «Скачать всю БД».
+        if HAS_ZWYLIB:
+            async_manager.run_task(self._async_sync_database(show_bulletin=True, force_clean=False))
+        else:
+            threading.Thread(
+                target=self._sync_database,
+                kwargs={"show_bulletin": True, "force_clean": False},
+                daemon=True,
+            ).start()
+
