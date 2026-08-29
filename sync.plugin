@@ -81,7 +81,7 @@ __id__ = "sync_profile"
 __name__ = "SyncProfile"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) между пользователями плагина с интеграцией ZwyLib."
 __author__ = "@Kukuryzen"
-__version__ = "10.2.29"
+__version__ = "10.2.34"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -179,25 +179,45 @@ def _safe_int(val: Any, default: int = 0) -> int:
     except Exception:
         return default
 
+# Кэши результатов _is_user / _is_chat по имени класса.
+# Chaquopy: hasattr() на Java-объекте — рефлексия JVM (~10-50µs каждый вызов).
+# При прокрутке RecyclerView каждый getUser() проходит через хук → экономим ms/frame.
+_USER_CLASS_CACHE: Dict[str, bool] = {}
+_CHAT_CLASS_CACHE: Dict[str, bool] = {}
+
 def _is_user(obj: Any) -> bool:
     if obj is None:
         return False
-    if hasattr(obj, "first_name") or hasattr(obj, "phone") or hasattr(obj, "last_name"):
-        return True
-    cls_name = getattr(obj, "__class__", None)
-    if cls_name and "User" in str(cls_name):
-        return True
-    return False
+    cls_key = type(obj).__name__
+    cached = _USER_CLASS_CACHE.get(cls_key)
+    if cached is not None:
+        return cached
+    result = (
+        hasattr(obj, "first_name")
+        or hasattr(obj, "phone")
+        or hasattr(obj, "last_name")
+        or "User" in cls_key
+    )
+    _USER_CLASS_CACHE[cls_key] = result
+    return result
 
 def _is_chat(obj: Any) -> bool:
     if obj is None:
         return False
-    if hasattr(obj, "title") or hasattr(obj, "broadcast") or hasattr(obj, "megagroup") or hasattr(obj, "participants_count"):
-        return True
-    cls_name = getattr(obj, "__class__", None)
-    if cls_name and ("Chat" in str(cls_name) or "Channel" in str(cls_name)):
-        return True
-    return False
+    cls_key = type(obj).__name__
+    cached = _CHAT_CLASS_CACHE.get(cls_key)
+    if cached is not None:
+        return cached
+    result = (
+        hasattr(obj, "title")
+        or hasattr(obj, "broadcast")
+        or hasattr(obj, "megagroup")
+        or hasattr(obj, "participants_count")
+        or "Chat" in cls_key
+        or "Channel" in cls_key
+    )
+    _CHAT_CLASS_CACHE[cls_key] = result
+    return result
 
 def _normalize_chat_id(cid: Any) -> int:
     raw = _safe_int(cid, 0)
@@ -271,6 +291,12 @@ class Plugin(BasePlugin):
         self._json_cache_file = None
         self._last_selected_message: Optional[Any] = None
 
+        # ── Оптимизация: кэши hot-path ──────────────────────────────
+        # UIDs с уже нормализованными флагами видеоаватара.
+        # Не используем patch_cache: Telegram создаёт новые Java-объекты
+        # при каждом обновлении из сети/БД — кэш по uid несовместим с этим.
+        self._video_avatar_uids: set = set()
+
         if HAS_ZWYLIB:
             try:
                 self._json_cache_file = JsonCacheFile("sync_profiles_cache.json", default={}, compress=True)
@@ -280,6 +306,15 @@ class Plugin(BasePlugin):
     def on_plugin_load(self):
         logger.info(f"SyncProfile v{__version__}: Загрузка (ZwyLib: {'Включен' if HAS_ZWYLIB else 'Не установлен'})...")
         self._is_running = True
+        # Инициализируем TLRPC один раз при загрузке, чтобы не проверять
+        # `if TLRPC is None` на каждый вызов getUser() в hot-path.
+        global TLRPC
+        if TLRPC is None:
+            try:
+                from org.telegram.tgnet import TLRPC as _TLRPC
+                TLRPC = _TLRPC
+            except Exception:
+                pass
         self._load_local_profiles_cache()
         self._auto_import_from_official_tg_premium()
         self._ensure_local_premium()
@@ -561,6 +596,20 @@ class Plugin(BasePlugin):
         self._profiles_snapshot = dict(self._profiles_cache)
         self._chats_snapshot = dict(self._chats_cache)
 
+    def _update_snapshot_partial(self, updated_ids: set):
+        """Инкрементальное обновление snapshot — только изменившиеся uid.
+        Для delta-sync: избегаем полного копирования dict при 1000+ профилях."""
+        snap = dict(self._profiles_snapshot)  # shallow copy
+        for uid in updated_ids:
+            p = self._profiles_cache.get(uid)
+            if p is not None:
+                snap[uid] = p
+            else:
+                snap.pop(uid, None)
+            # Инвалидируем patch-кэш только для изменившихся uid.
+            self._patch_cache.pop(uid, None)
+        self._profiles_snapshot = snap
+
     def _parse_items_map(self, raw_data: Any, is_chat: bool = False) -> Dict[int, Dict[str, Any]]:
         result = {}
         if not raw_data:
@@ -609,21 +658,23 @@ class Plugin(BasePlugin):
         if not _is_user(u):
             return False
 
-        # Normalize video avatar flags so all accounts see animated avatars
-        try:
-            ph = getattr(u, "photo", None)
-            if ph:
-                v_sizes = getattr(ph, "video_sizes", None)
-                has_v = bool(
-                    getattr(ph, "has_video", False)
-                    or (v_sizes and (hasattr(v_sizes, "isEmpty") and not v_sizes.isEmpty() or len(v_sizes) > 0))
-                    or ((int(getattr(ph, "flags", 0) or 0) & 1) != 0)
-                )
-                if has_v:
-                    ph.has_video = True
-                    ph.flags = int(getattr(ph, "flags", 0) | 1)
-        except Exception:
-            pass
+        # Нормализация флагов видеоаватара — только если ещё не делали для этого uid.
+        if uid not in self._video_avatar_uids:
+            try:
+                ph = getattr(u, "photo", None)
+                if ph:
+                    v_sizes = getattr(ph, "video_sizes", None)
+                    has_v = bool(
+                        getattr(ph, "has_video", False)
+                        or (v_sizes and (hasattr(v_sizes, "isEmpty") and not v_sizes.isEmpty() or len(v_sizes) > 0))
+                        or ((int(getattr(ph, "flags", 0) or 0) & 1) != 0)
+                    )
+                    if has_v:
+                        ph.has_video = True
+                        ph.flags = int(getattr(ph, "flags", 0) | 1)
+                        self._video_avatar_uids.add(uid)
+            except Exception:
+                pass
 
         # Lock-free hot-path: check snapshot first, fallback to live cache
         snap = self._profiles_snapshot
@@ -636,11 +687,6 @@ class Plugin(BasePlugin):
             return False
 
         try:
-            global TLRPC
-            if TLRPC is None:
-                from org.telegram.tgnet import TLRPC as _TLRPC
-                TLRPC = _TLRPC
-
             nc = _safe_int(profile.get("name_color", 0))
             nbg = _safe_int(profile.get("name_bg_emoji_id", 0))
             prc = _safe_int(profile.get("profile_color", 0))
@@ -655,13 +701,14 @@ class Plugin(BasePlugin):
             if prc_obj is not None:
                 u.profile_color = prc_obj
 
-            if em_id != 0:
+            if em_id != 0 and TLRPC is not None:
                 st = TLRPC.TL_emojiStatus()
-                st.document_id = em_id
+                try:
+                    st.document_id = long(em_id)
+                except Exception:
+                    st.document_id = em_id
                 u.emoji_status = st
 
-            # Always set premium for all users (including own accounts)
-            # so video avatars, emoji statuses and custom emoji are visible everywhere
             if bool(profile.get("premium", True)):
                 u.premium = True
 
@@ -762,7 +809,10 @@ class Plugin(BasePlugin):
 
             if em_id != 0:
                 st = TLRPC.TL_emojiStatus()
-                st.document_id = em_id
+                try:
+                    st.document_id = long(em_id)
+                except Exception:
+                    st.document_id = em_id
                 chat.emoji_status = st
 
             if boost_lvl > 0:
@@ -812,7 +862,10 @@ class Plugin(BasePlugin):
 
             if em_id != 0:
                 st = TLRPC.TL_emojiStatus()
-                st.document_id = em_id
+                try:
+                    st.document_id = long(em_id)
+                except Exception:
+                    st.document_id = em_id
                 fc.custom_status = st
                 fc.emoji_status = st
 
@@ -825,6 +878,83 @@ class Plugin(BasePlugin):
             return True
         except Exception:
             return False
+
+    # ─── helpers: reply-color resolution ────────────────────────────────────
+
+    def _extract_peer_uid(self, peer: Any) -> int:
+        """Extract integer user/channel id from any TL peer/user object."""
+        if not peer:
+            return 0
+        try:
+            if isinstance(peer, (int, float)):
+                val = int(peer)
+                return val if val > 0 else 0
+            for attr in ("user_id", "id", "channel_id", "chat_id"):
+                uid = getattr(peer, attr, 0)
+                if uid:
+                    val = int(uid)
+                    if val > 0:
+                        return val
+        except Exception:
+            pass
+        return 0
+
+    def _extract_reply_uid(self, msg: Any) -> int:
+        """Return the sender UID of the message being replied to."""
+        if not msg:
+            return 0
+        try:
+            r_msg = getattr(msg, "replyMessageObject", None)
+            if r_msg:
+                peer = getattr(r_msg, "getFromPeer", lambda: None)()
+                if peer:
+                    uid = self._extract_peer_uid(peer)
+                    if uid > 0:
+                        return uid
+                mo = getattr(r_msg, "messageOwner", None)
+                if mo:
+                    uid = self._extract_peer_uid(getattr(mo, "from_id", None))
+                    if uid > 0:
+                        return uid
+                    uid = self._extract_peer_uid(getattr(mo, "peer_id", None))
+                    if uid > 0:
+                        return uid
+
+            mo = getattr(msg, "messageOwner", None)
+            if mo:
+                r_to = getattr(mo, "reply_to", None)
+                if r_to:
+                    uid = self._extract_peer_uid(getattr(r_to, "reply_to_peer_id", None))
+                    if uid > 0:
+                        return uid
+                    r_from = getattr(r_to, "reply_from", None)
+                    if r_from:
+                        uid = self._extract_peer_uid(getattr(r_from, "from_id", None))
+                        if uid > 0:
+                            return uid
+        except Exception:
+            pass
+        return 0
+
+    def _resolve_color_id_for_user(self, uid: int) -> int:
+        """Return name_color index for uid from cache, or 0."""
+        if uid <= 0:
+            return 0
+        prof = self._profiles_snapshot.get(uid)
+        if prof is None:
+            with self._sync_lock:
+                prof = self._profiles_cache.get(uid)
+        if prof:
+            return int(prof.get("name_color", 0) or 0)
+        return 0
+
+    def _get_vibrant_color_for_id(self, color_id: int) -> int:
+        """Convert name_color index to ARGB int using PROFILE_COLOR_RGB_MAP."""
+        c = int(color_id) if color_id is not None else 0
+        # name colors 0-6 map the same as profile colors 0-6
+        return PROFILE_COLOR_RGB_MAP.get(c % 7, PROFILE_COLOR_RGB_MAP[2])
+
+    # ─────────────────────────────────────────────────────────────────────────
 
     def _register_xposed_hooks(self):
         try:
@@ -993,6 +1123,56 @@ class Plugin(BasePlugin):
                     except Exception:
                         pass
 
+            # Hook MessageObject.getReplyColorId / getReplyColor so each cell
+            # independently gets the correct colour without a shared global flag.
+            # This fixes wrong colours when 3+ replies render simultaneously.
+            MessageObjectClass = find_class("org.telegram.messenger.MessageObject")
+            if MessageObjectClass:
+                plugin_self_ref = self  # alias for closure
+
+                class MsgObjGetReplyColorIdHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            msg_obj = getattr(param, "thisObject", None)
+                            if msg_obj:
+                                r_uid = plugin_self_ref._extract_reply_uid(msg_obj)
+                                if r_uid > 0:
+                                    c_id = plugin_self_ref._resolve_color_id_for_user(r_uid)
+                                    if c_id != 0:
+                                        param.setResult(c_id)
+                        except Exception:
+                            pass
+
+                class MsgObjGetReplyColorHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            msg_obj = getattr(param, "thisObject", None)
+                            if msg_obj:
+                                r_uid = plugin_self_ref._extract_reply_uid(msg_obj)
+                                if r_uid > 0:
+                                    nc = plugin_self_ref._resolve_color_id_for_user(r_uid)
+                                    if nc != 0:
+                                        param.setResult(plugin_self_ref._get_vibrant_color_for_id(nc))
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(MessageObjectClass):
+                    try:
+                        m_name = m.getName()
+                        p_count = len(m.getParameterTypes())
+                        if m_name == "getReplyColorId" and p_count == 0:
+                            m.setAccessible(True)
+                            un = self.hook_method(m, MsgObjGetReplyColorIdHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                        elif m_name == "getReplyColor" and p_count == 0:
+                            m.setAccessible(True)
+                            un = self.hook_method(m, MsgObjGetReplyColorHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception as e:
+                        log(f"SyncProfile: hook MessageObject.{m.getName()} error: {e}")
+
             log(f"SyncProfile: Установлено {len(self._xposed_unhooks)} хуков.")
         except Exception as e:
             log(f"SyncProfile: Ошибка регистрации хуков: {e}")
@@ -1157,7 +1337,8 @@ class Plugin(BasePlugin):
                                     self._cache_dirty = True
                                 except ValueError:
                                     continue
-                        self._update_snapshot()
+                        # Инкрементальное обновление: не копируем весь dict.
+                        self._update_snapshot_partial(updated_ids)
                         self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
                         self._save_local_profiles_cache()
                         updated_list = list(updated_ids)
@@ -1171,7 +1352,15 @@ class Plugin(BasePlugin):
                                 if mc and uids:
                                     for u_id in uids:
                                         try:
-                                            u_obj = mc.getUser(u_id)
+                                            # Явно передаём int (не Long), чтобы избежать
+                                            # ClassCastException в DialogsActivity.didReceivedNotification
+                                            # при возврате из чата (Long cannot be cast to Integer).
+                                            try:
+                                                from java.lang import Integer as _JInt
+                                                safe_id = _JInt(int(u_id) & 0x7FFFFFFF)
+                                            except Exception:
+                                                safe_id = int(u_id)
+                                            u_obj = mc.getUser(safe_id)
                                             if u_obj and _is_user(u_obj):
                                                 plugin_self._patch_user_tl_object(u_obj)
                                         except Exception:
@@ -1203,82 +1392,91 @@ class Plugin(BasePlugin):
                 bulletins.show_error(f"Ошибка синхронизации: {e}")
 
     def _apply_all_to_all_accounts(self):
-        def ui_update_task():
-            try:
-                from org.telegram.messenger import UserConfig
-                global TLRPC
-                if TLRPC is None:
-                    try:
-                        from org.telegram.tgnet import TLRPC as _TLRPC
-                        TLRPC = _TLRPC
-                    except Exception:
-                        pass
+        """Обновляет TL-объекты всех активных аккаунтов.
+        Тяжёлая работа (чтение настроек, сбор данных) — в background-потоке.
+        Лёгкая финальная часть (mc.getUser + поля) — на UI-потоке.
+        """
+        plugin_self = self
 
-                active_accs = self._get_active_accounts_data()
+        def bg_prepare():
+            """Background: собрать данные аккаунтов и обновить кэш."""
+            try:
+                active_accs = plugin_self._get_active_accounts_data()
+                patches = []  # list of (acc_idx, uid, nc, nbg, prc, pbg, em_id, prem)
+
                 for acc_info in active_accs:
                     acc_idx = acc_info.get("acc_idx", 0)
                     my_uid = acc_info.get("user_id", 0)
-                    if my_uid != 0:
-                        my_p = self._get_profile_dict_for_slot(acc_idx, my_uid)
-                        with self._sync_lock:
-                            self._profiles_cache[my_uid] = my_p
-                            self._cache_dirty = True
-                self._update_snapshot()
-
-                for acc_info in active_accs:
-                    acc = acc_info.get("acc_idx", 0)
-                    my_acc_uid = acc_info.get("user_id", 0)
-                    if my_acc_uid == 0:
+                    if my_uid <= 0:
                         continue
+                    slot_p = plugin_self._get_profile_dict_for_slot(acc_idx, my_uid)
+                    with plugin_self._sync_lock:
+                        plugin_self._profiles_cache[my_uid] = slot_p
+                        plugin_self._cache_dirty = True
+
+                    nc  = _safe_int(slot_p.get("name_color", 0))
+                    nbg = _safe_int(slot_p.get("name_bg_emoji_id", 0))
+                    prc = _safe_int(slot_p.get("profile_color", 0))
+                    pbg = _safe_int(slot_p.get("profile_bg_emoji_id", 0))
+                    em_id = _safe_int(slot_p.get("emoji_status_id", 0))
+                    prem  = bool(slot_p.get("premium", True))
+                    patches.append((acc_idx, my_uid, nc, nbg, prc, pbg, em_id, prem))
+
+                plugin_self._update_snapshot_partial({p[1] for p in patches})
+
+                def ui_apply(patches=patches):
                     try:
-                        u_cfg = UserConfig.getInstance(acc)
-                        if not u_cfg or not u_cfg.isClientActivated():
-                            continue
+                        from org.telegram.messenger import UserConfig, MessagesController
+                        sel_acc = getattr(UserConfig, "selectedAccount", 0)
 
-                        curr_u = u_cfg.getCurrentUser()
-                        if curr_u:
-                            slot_p = self._get_profile_dict_for_slot(acc, my_acc_uid)
+                        for acc_idx, my_uid, nc, nbg, prc, pbg, em_id, prem in patches:
+                            try:
+                                u_cfg = UserConfig.getInstance(acc_idx)
+                                if not u_cfg or not u_cfg.isClientActivated():
+                                    continue
+                                curr_u = u_cfg.getCurrentUser()
+                                if not curr_u:
+                                    continue
 
-                            nc = _safe_int(slot_p.get("name_color", 0))
-                            nbg = _safe_int(slot_p.get("name_bg_emoji_id", 0))
-                            prc = _safe_int(slot_p.get("profile_color", 0))
-                            pbg = _safe_int(slot_p.get("profile_bg_emoji_id", 0))
+                                pc_obj = _build_peer_color(nc, nbg)
+                                if pc_obj is not None:
+                                    curr_u.color = pc_obj
 
-                            pc_obj = _build_peer_color(nc, nbg)
-                            if pc_obj is not None:
-                                curr_u.color = pc_obj
+                                prc_obj = _build_peer_color(prc, pbg)
+                                if prc_obj is not None:
+                                    curr_u.profile_color = prc_obj
 
-                            prc_obj = _build_peer_color(prc, pbg)
-                            if prc_obj is not None:
-                                curr_u.profile_color = prc_obj
+                                if em_id != 0 and TLRPC is not None:
+                                    st = TLRPC.TL_emojiStatus()
+                                    try:
+                                        st.document_id = long(em_id)
+                                    except Exception:
+                                        st.document_id = em_id
+                                    curr_u.emoji_status = st
 
-                            em_id = _safe_int(slot_p.get("emoji_status_id", 0))
-                            if em_id != 0 and TLRPC is not None:
-                                st = TLRPC.TL_emojiStatus()
-                                st.document_id = em_id
-                                curr_u.emoji_status = st
+                                if prem:
+                                    curr_u.premium = True
+                            except Exception:
+                                pass
 
+                        mc = MessagesController.getInstance(sel_acc)
+                        if mc:
+                            for _, uid2, *_ in patches:
+                                if uid2 > 0:
+                                    try:
+                                        u_obj2 = mc.getUser(uid2)
+                                        if u_obj2 and _is_user(u_obj2):
+                                            plugin_self._patch_user_tl_object(u_obj2)
+                                    except Exception:
+                                        pass
                     except Exception as e:
-                        log(f"SyncProfile: _apply_all_to_all_accounts acc {acc} error: {e}")
+                        log(f"SyncProfile: _apply_all ui_apply error: {e}")
 
-                sel_acc = getattr(UserConfig, "selectedAccount", 0)
-                try:
-                    from org.telegram.messenger import MessagesController
-                    mc = MessagesController.getInstance(sel_acc)
-                    if mc:
-                        for acc_info2 in active_accs:
-                            uid2 = acc_info2.get("user_id", 0)
-                            if uid2 > 0:
-                                u_obj2 = mc.getUser(uid2)
-                                if u_obj2 and _is_user(u_obj2):
-                                    self._patch_user_tl_object(u_obj2)
-                except Exception:
-                    pass
-
+                run_on_ui_thread(ui_apply)
             except Exception as e:
-                log(f"SyncProfile: _apply_all_to_all_accounts error: {e}")
+                log(f"SyncProfile: _apply_all bg_prepare error: {e}")
 
-        run_on_ui_thread(ui_update_task)
+        threading.Thread(target=bg_prepare, daemon=True).start()
 
     def push_specific_account(self, acc_idx: int, show_ui_bulletin: bool = True):
         uid = 0
