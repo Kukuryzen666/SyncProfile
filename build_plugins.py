@@ -21,12 +21,6 @@ def main():
         py_compile.compile(p, doraise=True)
         print(f"Verified OK: {os.path.basename(p)} ({os.path.getsize(p)} bytes)")
 
-    # Provide sync.plugin as universal build
-    import shutil
-    shutil.copyfile(os.path.join(root, "sync_exteragram.plugin"), os.path.join(root, "sync.plugin"))
-    py_compile.compile(os.path.join(root, "sync.plugin"), doraise=True)
-    print(f"Verified OK: sync.plugin ({os.path.getsize(os.path.join(root, 'sync.plugin'))} bytes)")
-
 if __name__ == "__main__":
     main()
 
