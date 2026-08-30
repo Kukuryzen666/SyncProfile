@@ -2,10 +2,9 @@
 
 [![Version](https://img.shields.io/badge/version-10.3.14-blue.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile/releases/latest)
 [![Clients](https://img.shields.io/badge/Clients-AyuGram%20%7C%20exteraGram-8A2BE2.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile)
-[![Performance](https://img.shields.io/badge/Performance-120%20FPS%20Fast--Path-success.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile)
 [![Server](https://img.shields.io/badge/Server-sync.efn.mom-0088cc.svg?style=for-the-badge)](https://sync.efn.mom)
 
-**SyncProfile** — мощный плагин для Telegram-клиентов (**AyuGram** и **exteraGram**), разработанный на базе [exteraGram Plugin SDK](https://plugins.exteragram.app/docs) и [ZwyLib](https://github.com/Zwyx/ZwyLib).
+**SyncProfile** — плагин для Telegram-клиентов (**AyuGram** и **exteraGram**), разработанный на базе [exteraGram Plugin SDK](https://plugins.exteragram.app/docs) и [ZwyLib](https://github.com/Zwyx/ZwyLib).
 
 Плагин позволяет синхронизировать и отображать локальные параметры профиля (Telegram Premium, цвет имени и ответов, цвет обложки, анимированные эмодзи-статусы, фоновые узоры и видеоаватары) между пользователями в реальном времени, а также разблокирует отправку кастомных премиум-эмодзи.
 
@@ -27,10 +26,6 @@
 - **Отправка премиум-эмодзи из клавиатуры без официальной подписки**: отправляйте любые кастомные эмодзи в сообщения — они не вырезаются сервером Telegram.
 - **Двусторонняя видимость**: кастомные эмодзи, отправленные из exteraGram, отображаются и анимируются в AyuGram, и наоборот.
 - **Премиум-стикеры и расширенные реакции**: разблокировка локальных возможностей Premium-аккаунта.
-
-### ⚡ Производительность 120 FPS (Fast-Path)
-- **O(1) Memory Cache**: мгновенное считывание параметров (~8ns) без накладных расходов JNI reflection и лишних блокировок потоков.
-- **Без микрофризов и лагов**: тяжелые перехватчики удалены с горячих путей отрисовки, обеспечивая плавные 120 кадров в секунду при прокрутке чатов.
 
 ### 🔄 Умная синхронизация (Delta-Sync)
 - **Дельта-синхронизация**: плагин запрашивает только новые и изменённые данные, экономя заряд батареи и сетевой трафик.
@@ -72,7 +67,6 @@
 | **Эмодзи-статусы и фоновые паттерны** | ✅ | ✅ |
 | **Анимированные видеоаватары** | ✅ | ✅ |
 | **Встроенная отправка кастомных эмодзи** | ✅ *(через AyuGram)* | ✅ *(встроенный метод)* |
-| **120 FPS Fast-Path оптимизация** | ✅ | ✅ |
 | **Мульти-аккаунты (до 4 слотов)** | ✅ | ✅ |
 | **Быстрая Delta-Sync с sync.efn.mom** | ✅ | ✅ |
 
