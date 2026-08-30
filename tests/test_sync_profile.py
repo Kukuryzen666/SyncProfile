@@ -1435,10 +1435,10 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             plugin._get_my_active_uids = lambda: [777000]
 
             class Param:
-                def __init__(self, this_obj=None, args=None):
+                def __init__(self, this_obj=None, args=None, result=None):
                     self.thisObject = this_obj
                     self.args = args or []
-                    self.result = None
+                    self.result = result
                 def setResult(self, val):
                     self.result = val
                 def getResult(self):
@@ -1472,11 +1472,17 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                     FakeMethod("areFiltersLocked"),
                     FakeMethod("isPremiumUser", [object]),
                     FakeMethod("isUserPremium", [object]),
-                    FakeMethod("hasPremium", [object]),
                     FakeMethod("getUser", [FakeMethod("long")]),
-                    FakeMethod("isPremium"),
-                    FakeMethod("hasPremiumOnAccounts"),
+                    FakeMethod("getDialogFilter", [object]),
+                    FakeMethod("getDialogFilters"),
+                    FakeMethod("loadDialogFilters"),
                     FakeMethod("checkFilterLocked"),
+                    FakeMethod("onResume"),
+                    FakeMethod("isLocked"),
+                    FakeMethod("canUseCustomEmoji", [object]),
+                    FakeMethod("isCustomEmojiAvailable", [object]),
+                    FakeMethod("showCustomEmojiPremiumAlert", [object]),
+                    FakeMethod("switchToFolder", [object]),
                 ]
 
             module._get_class_methods = fake_get_class_methods
@@ -1485,11 +1491,18 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             plugin._register_xposed_hooks()
             self.assertTrue(len(plugin._xposed_unhooks) > 0)
 
-            # Find LockFiltersHook, IsFilterLockedHook, and IsPremiumHook in registered hooks
+            # Find LockFiltersHook, IsFilterLockedHook, GetDialogFilterHook, etc.
             lock_hooks = []
             filter_locked_hooks = []
-            is_prem_mc_hooks = []
+            get_dialog_filter_hooks = []
+            get_dialog_filters_hooks = []
+            load_dialog_filters_hooks = []
+            dialog_filter_is_locked_hooks = []
+            media_data_hooks = []
+            alerts_creator_hooks = []
             dialogs_act_hooks = []
+            dialogs_resume_hooks = []
+            dialogs_switch_folder_hooks = []
 
             for m, h in registered_hooks:
                 h_name = h.__class__.__name__
@@ -1497,22 +1510,57 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                     lock_hooks.append((m, h))
                 elif "IsFilterLockedHook" in h_name:
                     filter_locked_hooks.append((m, h))
-                elif "MessagesControllerIsPremiumHook" in h_name:
-                    is_prem_mc_hooks.append((m, h))
+                elif "GetDialogFilterHook" in h_name:
+                    get_dialog_filter_hooks.append((m, h))
+                elif "GetDialogFiltersHook" in h_name:
+                    get_dialog_filters_hooks.append((m, h))
+                elif "LoadDialogFiltersHook" in h_name:
+                    load_dialog_filters_hooks.append((m, h))
+                elif "DialogFilterIsLockedHook" in h_name:
+                    dialog_filter_is_locked_hooks.append((m, h))
+                elif "MediaDataControllerCanUseEmojiHook" in h_name:
+                    media_data_hooks.append((m, h))
+                elif "AlertsCreatorDismissHook" in h_name:
+                    alerts_creator_hooks.append((m, h))
                 elif "DialogsActivityCheckFilterLockedHook" in h_name:
                     dialogs_act_hooks.append((m, h))
+                elif "DialogsActivityResumeHook" in h_name:
+                    dialogs_resume_hooks.append((m, h))
+                elif "DialogsActivitySwitchFolderHook" in h_name:
+                    dialogs_switch_folder_hooks.append((m, h))
 
             # Verify ALL 3 lock filter methods are hooked
             self.assertEqual(len(lock_hooks), 3)
             lock_method_names = {m.getName() for m, h in lock_hooks}
             self.assertEqual(lock_method_names, {"lockFiltersInternal", "checkFiltersLocked", "lockFilters"})
 
-            # Test LockFiltersHook unlocks dialogFilters and cancels method
+            # Test LockFiltersHook unlocks dialogFilters and cancels method with False
             p = Param(this_obj=mc_inst)
             lock_hooks[0][1].before_hooked_method(p)
             self.assertFalse(mc_inst.dialogFilters[0].locked)
             self.assertFalse(mc_inst.dialogFilters[1].locked)
-            self.assertIsNone(p.result)
+            self.assertFalse(p.result)
+
+            # Test GetDialogFilterHook unlocks returned filter
+            self.assertTrue(len(get_dialog_filter_hooks) >= 1)
+            locked_f = MockDialogFilter(locked=True)
+            p_gdf = Param(result=locked_f)
+            get_dialog_filter_hooks[0][1].after_hooked_method(p_gdf)
+            self.assertFalse(locked_f.locked)
+
+            # Test GetDialogFiltersHook unlocks list of filters
+            self.assertTrue(len(get_dialog_filters_hooks) >= 1)
+            locked_fs = [MockDialogFilter(locked=True), MockDialogFilter(locked=True)]
+            p_gdfs = Param(result=locked_fs)
+            get_dialog_filters_hooks[0][1].after_hooked_method(p_gdfs)
+            self.assertFalse(locked_fs[0].locked)
+            self.assertFalse(locked_fs[1].locked)
+
+            # Test DialogFilterIsLockedHook returns False
+            self.assertTrue(len(dialog_filter_is_locked_hooks) >= 1)
+            p_dfil = Param()
+            dialog_filter_is_locked_hooks[0][1].before_hooked_method(p_dfil)
+            self.assertFalse(p_dfil.result)
 
             # Verify ALL 3 isFilterLocked methods are hooked and return False
             self.assertEqual(len(filter_locked_hooks), 3)
@@ -1520,30 +1568,23 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             filter_locked_hooks[0][1].before_hooked_method(p_fl)
             self.assertFalse(p_fl.result)
 
-            # Verify DialogsActivity hook cancels checkFilterLocked
+            # Test MediaDataControllerCanUseEmojiHook returns True
+            self.assertTrue(len(media_data_hooks) >= 1)
+            p_mdc = Param()
+            media_data_hooks[0][1].before_hooked_method(p_mdc)
+            self.assertTrue(p_mdc.result)
+
+            # Test AlertsCreatorDismissHook dismisses alert with None
+            self.assertTrue(len(alerts_creator_hooks) >= 1)
+            p_ac = Param()
+            alerts_creator_hooks[0][1].before_hooked_method(p_ac)
+            self.assertIsNone(p_ac.result)
+
+            # Verify DialogsActivity hook cancels checkFilterLocked with False
             self.assertTrue(len(dialogs_act_hooks) >= 1)
             p_da = Param()
             dialogs_act_hooks[0][1].before_hooked_method(p_da)
-            self.assertIsNone(p_da.result)
-
-            # 2. Test MessagesControllerIsPremiumHook returns True for own account and SyncProfile user, but not for others
-            self.assertTrue(len(is_prem_mc_hooks) >= 1)
-            is_prem_mc_hook = is_prem_mc_hooks[0][1]
-            # Own account -> True
-            p_prem = Param(args=[777000])
-            is_prem_mc_hook.after_hooked_method(p_prem)
-            self.assertTrue(p_prem.result)
-
-            # SyncProfile user with premium=True -> True
-            plugin.get_cached_profile = lambda uid: {"premium": True} if uid == 888111 else None
-            p_sync_prem = Param(args=[888111])
-            is_prem_mc_hook.after_hooked_method(p_sync_prem)
-            self.assertTrue(p_sync_prem.result)
-
-            # Random user not in SyncProfile -> result remains None/untouched (no fake premium)
-            p_other = Param(args=[999999])
-            is_prem_mc_hook.after_hooked_method(p_other)
-            self.assertIsNone(p_other.result)
+            self.assertFalse(p_da.result)
 
             # 3. Test _patch_user_tl_object keeps premium=True for own account even if not in snapshot
             class MockUser:

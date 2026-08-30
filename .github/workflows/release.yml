@@ -47,6 +47,7 @@ jobs:
           files: |
             sync_ayugram.plugin
             sync_exteragram.plugin
+            sync.plugin
             zwylib.plugin
           generate_release_notes: false
           draft: false
