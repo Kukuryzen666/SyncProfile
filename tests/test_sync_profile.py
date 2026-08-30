@@ -1371,7 +1371,274 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             self.assertIsInstance(upd.message.entities[0], MockTLRPC.TL_messageEntityCustomEmoji)
             self.assertEqual(upd.message.entities[0].document_id, 9988776655)
 
+    def test_prevent_folder_reset_hooks_and_is_premium(self):
+        """Тест регистрации и работы хуков защиты от сброса папок («Все чаты»)."""
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+            plugin._is_running = True
+
+            class MockDialogFilter:
+                def __init__(self, locked=True):
+                    self.locked = locked
+
+            class MockMessagesController:
+                def __init__(self):
+                    self.dialogFilters = [MockDialogFilter(True), MockDialogFilter(True)]
+                def getUser(self, uid):
+                    return None
+                def getChat(self, cid):
+                    return None
+                def getUserFull(self, uid):
+                    return None
+                def getChatFull(self, cid):
+                    return None
+                def putUser(self, user):
+                    pass
+                def putChat(self, chat):
+                    pass
+                def putMessage(self, msg):
+                    pass
+                def putMessages(self, msgs):
+                    pass
+                def lockFiltersInternal(self):
+                    pass
+                def checkFiltersLocked(self):
+                    pass
+                def isPremiumUser(self, uid):
+                    return False
+
+            class MockUserConfig:
+                @classmethod
+                def getInstance(cls, acc=0):
+                    return cls()
+                def isPremium(self):
+                    return False
+                def getClientUserId(self):
+                    return 777000
+
+            class MockUserObject:
+                @staticmethod
+                def isPremiumUser(user):
+                    return False
+
+            # Hook registration
+            registered_hooks = []
+            def fake_hook_method(method, hook_instance):
+                registered_hooks.append((method, hook_instance))
+                return object()
+
+            plugin.hook_method = fake_hook_method
+            plugin._get_my_active_uids = lambda: [777000]
+
+            class Param:
+                def __init__(self, this_obj=None, args=None):
+                    self.thisObject = this_obj
+                    self.args = args or []
+                    self.result = None
+                def setResult(self, val):
+                    self.result = val
+                def getResult(self):
+                    return self.result
+
+            # 1. Test LockFiltersHook unlocks dialogFilters and cancels method
+            mc_inst = MockMessagesController()
+            self.assertTrue(mc_inst.dialogFilters[0].locked)
+            self.assertTrue(mc_inst.dialogFilters[1].locked)
+
+            # Test MessagesControllerLockFiltersHook
+            # Reconstruct class dynamically or via find_class
+            class FakeMethod:
+                def __init__(self, name, p_types=None):
+                    self._name = name
+                    self._p_types = p_types or []
+                def getName(self):
+                    return self._name
+                def getParameterTypes(self):
+                    return self._p_types
+                def setAccessible(self, val):
+                    pass
+
+            def fake_get_class_methods(cls):
+                return [
+                    FakeMethod("lockFiltersInternal"),
+                    FakeMethod("checkFiltersLocked"),
+                    FakeMethod("isPremiumUser", [object]),
+                    FakeMethod("getUser", [FakeMethod("long")]),
+                ]
+
+            module._get_class_methods = fake_get_class_methods
+            module.find_class = lambda name: object()
+
+            plugin._register_xposed_hooks()
+            self.assertTrue(len(plugin._xposed_unhooks) > 0)
+
+            # Find LockFiltersHook in registered hooks
+            lock_hook = None
+            is_prem_mc_hook = None
+            for m, h in registered_hooks:
+                if "LockFiltersHook" in h.__class__.__name__:
+                    lock_hook = h
+                elif "MessagesControllerIsPremiumHook" in h.__class__.__name__:
+                    is_prem_mc_hook = h
+
+            self.assertIsNotNone(lock_hook)
+            p = Param(this_obj=mc_inst)
+            lock_hook.before_hooked_method(p)
+            self.assertFalse(mc_inst.dialogFilters[0].locked)
+            self.assertFalse(mc_inst.dialogFilters[1].locked)
+            self.assertIsNone(p.result)
+
+            # 2. Test MessagesControllerIsPremiumHook returns True for own account and SyncProfile user, but not for others
+            self.assertIsNotNone(is_prem_mc_hook)
+            # Own account -> True
+            p_prem = Param(args=[777000])
+            is_prem_mc_hook.after_hooked_method(p_prem)
+            self.assertTrue(p_prem.result)
+
+            # SyncProfile user with premium=True -> True
+            plugin.get_cached_profile = lambda uid: {"premium": True} if uid == 888111 else None
+            p_sync_prem = Param(args=[888111])
+            is_prem_mc_hook.after_hooked_method(p_sync_prem)
+            self.assertTrue(p_sync_prem.result)
+
+            # Random user not in SyncProfile -> result remains None/untouched (no fake premium)
+            p_other = Param(args=[999999])
+            is_prem_mc_hook.after_hooked_method(p_other)
+            self.assertIsNone(p_other.result)
+
+            # 3. Test _patch_user_tl_object keeps premium=True for own account even if not in snapshot
+            class MockUser:
+                def __init__(self, uid):
+                    self.id = uid
+                    self.premium = False
+                    self.flags = 0
+                    self.flags2 = 0
+                    self.photo = None
+            u_own = MockUser(777000)
+            plugin._profiles_snapshot = {}
+            plugin._patch_user_tl_object(u_own)
+            self.assertTrue(u_own.premium)
+
+            # Random user not in SyncProfile -> _patch_user_tl_object returns False and premium stays False
+            u_other = MockUser(999999)
+            res = plugin._patch_user_tl_object(u_other)
+            self.assertFalse(res)
+            self.assertFalse(u_other.premium)
+
+    def test_sync_local_ayuconfig_dirty_check(self):
+        """Тест: _sync_local_ayuconfig не вызывает saveConfig если параметры не изменились."""
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+
+            class MockAyuConfig:
+                nameColor = 5
+                nameCustomEmojiId = 12345
+                profileColor = 3
+                profileCustomEmojiId = 67890
+                statusEmojiId = 99999
+                localPremium = True
+                save_count = 0
+                @classmethod
+                def saveConfig(cls):
+                    cls.save_count += 1
+
+            # Mock imports
+            class MockUserConfig:
+                @classmethod
+                def getInstance(cls, acc=0):
+                    return cls()
+                def getClientUserId(self):
+                    return 1001
+
+            import sys
+            class FakeRadolyn:
+                pass
+            fake_radolyn = FakeRadolyn()
+            fake_radolyn.AyuConfig = MockAyuConfig
+
+            sys.modules["com.radolyn.ayugram"] = fake_radolyn
+            sys.modules["org.telegram.messenger.UserConfig"] = MockUserConfig
+
+            plugin._get_profile_dict_for_slot = lambda acc, uid: {
+                "name_color": 5,
+                "name_bg_emoji_id": 12345,
+                "profile_color": 3,
+                "profile_bg_emoji_id": 67890,
+                "emoji_status_id": 99999,
+                "premium": True,
+            }
+
+            MockAyuConfig.save_count = 0
+            plugin._sync_local_ayuconfig(0)
+            # Ничего не изменилось -> saveConfig не вызывается!
+            self.assertEqual(MockAyuConfig.save_count, 0)
+
+            # Теперь изменим один параметр -> saveConfig должен вызваться 1 раз
+            plugin._get_profile_dict_for_slot = lambda acc, uid: {
+                "name_color": 7, # Changed!
+                "name_bg_emoji_id": 12345,
+                "profile_color": 3,
+                "profile_bg_emoji_id": 67890,
+                "emoji_status_id": 99999,
+                "premium": True,
+            }
+            plugin._sync_local_ayuconfig(0)
+            self.assertEqual(MockAyuConfig.save_count, 1)
+            self.assertEqual(MockAyuConfig.nameColor, 7)
+
+    def test_version_tagging_and_untracked_uids_fast_path(self):
+        """Тест: тегирование _sp_v и мгновенное отсечение через _untracked_uids."""
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+
+            plugin._profiles_cache[12345] = {"user_id": 12345, "name_color": 2, "profile_color": 3}
+            plugin._update_snapshot()
+
+            user_tracked = MockUser(12345)
+            user_untracked = MockUser(67890)
+
+            # 1. Первый вызов для отслеживаемого юзера
+            self.assertTrue(plugin._patch_user_tl_object(user_tracked))
+            self.assertEqual(getattr(user_tracked, "_sp_v", None), (plugin._cache_version, 12345))
+
+            # 2. Повторный вызов — возвращает True по _sp_v
+            self.assertTrue(plugin._patch_user_tl_object(user_tracked))
+
+            # 3. Неотслеживаемый юзер попадает в _untracked_uids
+            self.assertFalse(plugin._patch_user_tl_object(user_untracked))
+            self.assertIn(67890, plugin._untracked_uids)
+
+            # 4. Повторный вызов для неотслеживаемого юзера мгновенно возвращает False
+            self.assertFalse(plugin._patch_user_tl_object(user_untracked))
+
+            # 5. При обновлении snapshot неотслеживаемый кэш очищается
+            plugin._update_snapshot()
+            self.assertEqual(len(plugin._untracked_uids), 0)
+
+    def test_static_peer_colors_and_emoji_status_builder(self):
+        """Тест: пул _STATIC_PEER_COLORS и _build_emoji_status."""
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+            plugin.on_plugin_load()
+
+            # Static peer colors (0..20)
+            pc0 = module._build_peer_color(0, 0)
+            self.assertIsNotNone(pc0)
+            self.assertEqual(pc0.color, 0)
+            self.assertIs(module._build_peer_color(0, 0), pc0)
+
+            # Custom status builder
+            st1 = module._build_emoji_status(5544332211)
+            self.assertIsNotNone(st1)
+            self.assertEqual(st1.document_id, 5544332211)
+            self.assertIs(module._build_emoji_status(5544332211), st1)
+
 if __name__ == "__main__":
     unittest.main()
+
 
 

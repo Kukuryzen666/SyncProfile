@@ -91,7 +91,7 @@ __id__ = "sync_profile_exteragram"
 __name__ = "SyncProfile [exteraGram]"
 __description__ = "Синхронизация кастомного профиля и встроенный Local Premium (отправка и отображение кастомных эмодзи, повышенные лимиты, премиум стикеры/реакции) для клиентов exteraGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.15"
+__version__ = "10.3.16"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -289,6 +289,7 @@ def _is_ayugram() -> bool:
 _peer_color_cache: Dict[Any, Any] = {}
 # Кэш TL_emojiStatus объектов: document_id → TL_emojiStatus.
 _emoji_status_cache: Dict[int, Any] = {}
+_STATIC_PEER_COLORS: Dict[int, Any] = {}
 
 def _build_peer_color(color_id: Any, bg_emoji_id: Any):
     if color_id is None:
@@ -297,6 +298,8 @@ def _build_peer_color(color_id: Any, bg_emoji_id: Any):
     if c < 0:
         return None
     bg = _safe_int(bg_emoji_id, 0)
+    if bg == 0 and c in _STATIC_PEER_COLORS:
+        return _STATIC_PEER_COLORS[c]
 
     cache_key = (c, bg)
     if cache_key in _peer_color_cache:
@@ -307,20 +310,42 @@ def _build_peer_color(color_id: Any, bg_emoji_id: Any):
         if TLRPC is None:
             from org.telegram.tgnet import TLRPC as _TLRPC
             TLRPC = _TLRPC
-        pc = TLRPC.TL_peerColor()
-        pc.color = c
-        if bg != 0:
-            pc.background_emoji_id = bg
-            pc.flags = 3
-        else:
-            pc.background_emoji_id = 0
-            pc.flags = 1
-        # Баг-фикс: кэш проверялся но НИКОГДА не заполнялся —
-        # создавался новый Java-объект при каждом getUser() при прокрутке.
-        _peer_color_cache[cache_key] = pc
-        return pc
+        if TLRPC is not None:
+            pc = TLRPC.TL_peerColor()
+            pc.color = c
+            if bg != 0:
+                pc.background_emoji_id = bg
+                pc.flags = 3
+            else:
+                pc.background_emoji_id = 0
+                pc.flags = 1
+            if len(_peer_color_cache) < 500:
+                _peer_color_cache[cache_key] = pc
+            return pc
     except Exception:
+        pass
+    return None
+
+def _build_emoji_status(em_id: int):
+    if not em_id:
         return None
+    cached = _emoji_status_cache.get(em_id)
+    if cached is not None:
+        return cached
+    try:
+        global TLRPC
+        if TLRPC is None:
+            from org.telegram.tgnet import TLRPC as _TLRPC
+            TLRPC = _TLRPC
+        if TLRPC is not None:
+            st = TLRPC.TL_emojiStatus()
+            st.document_id = em_id
+            if len(_emoji_status_cache) < 500:
+                _emoji_status_cache[em_id] = st
+            return st
+    except Exception:
+        pass
+    return None
 
 def _extract_emoji_doc_id_from_url(url: str) -> Optional[int]:
     """Сверхбыстрый парсинг ID кастомного эмодзи из URL без urllib.parse (в 50-100 раз быстрее)."""
@@ -597,6 +622,16 @@ class Plugin(BasePlugin):
                 TLRPC = _TLRPC
             except Exception:
                 pass
+        if TLRPC is not None and not _STATIC_PEER_COLORS:
+            for c in range(21):
+                try:
+                    pc = TLRPC.TL_peerColor()
+                    pc.color = c
+                    pc.background_emoji_id = 0
+                    pc.flags = 1
+                    _STATIC_PEER_COLORS[c] = pc
+                except Exception:
+                    pass
         self._load_local_profiles_cache()
         self._auto_import_from_official_tg_premium()
         self._ensure_local_premium()
@@ -994,18 +1029,37 @@ class Plugin(BasePlugin):
             u_cfg = UserConfig.getInstance(target_acc)
             uid = int(u_cfg.getClientUserId() or 0) if u_cfg else 0
             sel_p = self._get_profile_dict_for_slot(target_acc, uid)
-            if hasattr(AyuConfig, "nameColor"):
-                AyuConfig.nameColor = _safe_int(sel_p.get("name_color", 0))
-            if hasattr(AyuConfig, "nameCustomEmojiId"):
-                AyuConfig.nameCustomEmojiId = _safe_int(sel_p.get("name_bg_emoji_id", 0))
-            if hasattr(AyuConfig, "profileColor"):
-                AyuConfig.profileColor = _safe_int(sel_p.get("profile_color", 0))
-            if hasattr(AyuConfig, "profileCustomEmojiId"):
-                AyuConfig.profileCustomEmojiId = _safe_int(sel_p.get("profile_bg_emoji_id", 0))
-            if hasattr(AyuConfig, "statusEmojiId"):
-                AyuConfig.statusEmojiId = _safe_int(sel_p.get("emoji_status_id", 0))
+            changed = False
+
+            nc = _safe_int(sel_p.get("name_color", 0))
+            if hasattr(AyuConfig, "nameColor") and AyuConfig.nameColor != nc:
+                AyuConfig.nameColor = nc
+                changed = True
+
+            nbg = _safe_int(sel_p.get("name_bg_emoji_id", 0))
+            if hasattr(AyuConfig, "nameCustomEmojiId") and AyuConfig.nameCustomEmojiId != nbg:
+                AyuConfig.nameCustomEmojiId = nbg
+                changed = True
+
+            prc = _safe_int(sel_p.get("profile_color", 0))
+            if hasattr(AyuConfig, "profileColor") and AyuConfig.profileColor != prc:
+                AyuConfig.profileColor = prc
+                changed = True
+
+            pbg = _safe_int(sel_p.get("profile_bg_emoji_id", 0))
+            if hasattr(AyuConfig, "profileCustomEmojiId") and AyuConfig.profileCustomEmojiId != pbg:
+                AyuConfig.profileCustomEmojiId = pbg
+                changed = True
+
+            em_id = _safe_int(sel_p.get("emoji_status_id", 0))
+            if hasattr(AyuConfig, "statusEmojiId") and AyuConfig.statusEmojiId != em_id:
+                AyuConfig.statusEmojiId = em_id
+                changed = True
+
             if hasattr(AyuConfig, "localPremium") and not AyuConfig.localPremium and sel_p.get("premium", True):
                 AyuConfig.localPremium = True
+                changed = True
+
             for attr in (
                 "animateAvatars", "autoplayVideo", "loopAvatars",
                 "profileVideos", "profileVideoAutoplay", "streamAvatars",
@@ -1013,10 +1067,13 @@ class Plugin(BasePlugin):
             ):
                 if hasattr(AyuConfig, attr) and not getattr(AyuConfig, attr):
                     setattr(AyuConfig, attr, True)
-            if hasattr(AyuConfig, "saveConfig"):
-                AyuConfig.saveConfig()
-            elif hasattr(AyuConfig, "save"):
-                AyuConfig.save()
+                    changed = True
+
+            if changed:
+                if hasattr(AyuConfig, "saveConfig"):
+                    AyuConfig.saveConfig()
+                elif hasattr(AyuConfig, "save"):
+                    AyuConfig.save()
         except Exception:
             pass
 
@@ -1144,6 +1201,13 @@ class Plugin(BasePlugin):
         if not _is_user(u):
             return False
 
+        cur_ver = self._cache_version
+        if getattr(u, "_sp_v", None) == (cur_ver, uid):
+            return True
+
+        if uid in self._untracked_uids and uid in self._video_checked_uids:
+            return False
+
         # ── 1. Проверка и выставление видеоаватарки с O(1) кэшем проверенных UID ──
         if uid not in self._video_checked_uids:
             ph = getattr(u, "photo", None)
@@ -1167,7 +1231,15 @@ class Plugin(BasePlugin):
         # ── 2. Поиск в lock-free снимке SyncProfile (O(1) Python dict lookup ~30ns) ──
         snap = self._profiles_snapshot
         profile = snap.get(uid)
+        my_uids = getattr(self, "_own_uids_cache", None) or self._get_my_active_uids()
+        is_my_acc = uid in my_uids
+
         if not profile:
+            if is_my_acc:
+                u.premium = True
+                u._sp_v = (cur_ver, uid)
+                return True
+            self._untracked_uids.add(uid)
             return False
 
         # ── 3. Отслеживаемый пользователь SyncProfile ──
@@ -1214,15 +1286,14 @@ class Plugin(BasePlugin):
             if em_id != 0:
                 existing_st = getattr(u, "emoji_status", None)
                 if existing_st is None or _safe_int(getattr(existing_st, "document_id", 0)) != em_id:
-                    if TLRPC is not None:
-                        st = TLRPC.TL_emojiStatus()
-                        st.document_id = em_id
-                        u.emoji_status = st
+                    st_obj = _build_emoji_status(em_id)
+                    if st_obj is not None:
+                        u.emoji_status = st_obj
                 new_flags |= 0x40000000  # FLAG_EMOJI_STATUS (1 << 30 в flags TLRPC.User)
                 new_flags2 |= 1          # FLAG2_EMOJI_STATUS (1 << 0 в flags2 TLRPC.User)
 
             # 4. Премиум статус
-            if prem:
+            if prem or is_my_acc:
                 if not getattr(u, "premium", False):
                     u.premium = True
                 new_flags |= 0x10000000  # FLAG_PREMIUM (1 << 28 в flags TLRPC.User)
@@ -1233,6 +1304,7 @@ class Plugin(BasePlugin):
             if new_flags2 != cur_flags2:
                 u.flags2 = new_flags2
 
+            u._sp_v = (cur_ver, uid)
             return True
         except Exception:
             return False
@@ -1271,13 +1343,13 @@ class Plugin(BasePlugin):
                 if nc_obj is not None:
                     fu.color = nc_obj
 
-            if em_id != 0 and TLRPC is not None:
-                st = TLRPC.TL_emojiStatus()
-                st.document_id = em_id
-                fu.custom_status = st
-                fu.emoji_status = st
-                cur_fu_flags = int(getattr(fu, "flags", 0) or 0)
-                fu.flags = cur_fu_flags | 0x80000  # 1 << 19: custom_status in UserFull
+            if em_id != 0:
+                st_obj = _build_emoji_status(em_id)
+                if st_obj is not None:
+                    fu.custom_status = st_obj
+                    fu.emoji_status = st_obj
+                    cur_fu_flags = int(getattr(fu, "flags", 0) or 0)
+                    fu.flags = cur_fu_flags | 0x80000  # 1 << 19: custom_status in UserFull
 
             # Постоянная подпись об использовании SyncProfile в описании («О себе»)
             badge = "⚡ Этот пользователь использует SyncProfile"
@@ -1313,6 +1385,13 @@ class Plugin(BasePlugin):
         if not _is_chat(chat):
             return False
 
+        cur_ver = self._cache_version
+        if getattr(chat, "_sp_v", None) == (cur_ver, cid):
+            return True
+
+        if cid in self._untracked_cids and cid in self._video_checked_chat_ids:
+            return False
+
         # ── 1. Проверка и выставление видеоаватарки с O(1) кэшем проверенных CID ──
         if cid not in self._video_checked_chat_ids:
             ph = getattr(chat, "photo", None)
@@ -1341,6 +1420,7 @@ class Plugin(BasePlugin):
                 profile = self._chats_cache.get(cid)
 
         if not profile:
+            self._untracked_cids.add(cid)
             return False
 
         # ── 3. Отслеживаемый чат SyncProfile ──
@@ -1387,10 +1467,9 @@ class Plugin(BasePlugin):
             if em_id != 0:
                 existing_st = getattr(chat, "emoji_status", None)
                 if existing_st is None or _safe_int(getattr(existing_st, "document_id", 0)) != em_id:
-                    if TLRPC is not None:
-                        st = TLRPC.TL_emojiStatus()
-                        st.document_id = em_id
-                        chat.emoji_status = st
+                    st_obj = _build_emoji_status(em_id)
+                    if st_obj is not None:
+                        chat.emoji_status = st_obj
                 new_flags |= 512    # flags.9 для каналов (1 << 9)
                 new_flags2 |= 1     # flags2.0 для emoji_status (1 << 0)
                 new_flags2 |= 1024  # flags2.10 для супергрупп (1 << 10)
@@ -1403,6 +1482,7 @@ class Plugin(BasePlugin):
             if new_flags2 != cur_flags2:
                 chat.flags2 = new_flags2
 
+            chat._sp_v = (cur_ver, cid)
             return True
         except Exception:
             return False
@@ -1742,6 +1822,40 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
+                class MessagesControllerLockFiltersHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            this_mc = getattr(param, "thisObject", None)
+                            if this_mc and hasattr(this_mc, "dialogFilters"):
+                                dfs = getattr(this_mc, "dialogFilters", None)
+                                if dfs:
+                                    count = dfs.size() if hasattr(dfs, "size") else len(dfs)
+                                    for i in range(count):
+                                        f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
+                                        if f:
+                                            f.locked = False
+                            param.setResult(None)
+                        except Exception:
+                            pass
+
+                class MessagesControllerIsPremiumHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) > 0 and args[0] is not None:
+                                target = args[0]
+                                uid = int(getattr(target, "id", target) or 0) if not isinstance(target, int) else int(target)
+                                if uid > 0:
+                                    if uid in plugin_self._get_my_active_uids() or uid in getattr(plugin_self, "_own_uids_cache", set()):
+                                        param.setResult(True)
+                                        return
+                                    prof = plugin_self.get_cached_profile(uid)
+                                    if prof and prof.get("premium"):
+                                        param.setResult(True)
+                                        return
+                        except Exception:
+                            pass
+
                 methods = _get_class_methods(MessagesControllerClass)
 
                 # Hook ONLY ONE canonical overload to avoid cascade overhead on hot paths
@@ -1753,6 +1867,8 @@ class Plugin(BasePlugin):
                 put_chat_hooked = False
                 put_message_hooked = False
                 put_messages_hooked = False
+                lock_filters_hooked = False
+                is_premium_hooked = False
 
                 for m in methods:
                     try:
@@ -1818,8 +1934,71 @@ class Plugin(BasePlugin):
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
                                 put_messages_hooked = True
+                        elif not lock_filters_hooked and m_name in ("lockFiltersInternal", "checkFiltersLocked", "lockFilters"):
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, MessagesControllerLockFiltersHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                                lock_filters_hooked = True
+                        elif not is_premium_hooked and m_name in ("isUserPremium", "isPremiumUser", "hasPremium"):
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, MessagesControllerIsPremiumHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                                is_premium_hooked = True
                     except Exception as e:
                         log(f"SyncProfile: hook MessagesController method {m} error: {e}")
+
+            # ── Hook UserConfig.isPremium: предотвращает сброс активной вкладки папок при выходе из чата ──
+            UserConfigClass = find_class("org.telegram.messenger.UserConfig")
+            if UserConfigClass:
+                class UserConfigIsPremiumHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            param.setResult(True)
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(UserConfigClass):
+                    try:
+                        if m.getName() == "isPremium" and len(m.getParameterTypes()) == 0:
+                            m.setAccessible(True)
+                            un = self.hook_method(m, UserConfigIsPremiumHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception:
+                        pass
+
+            # ── Hook UserObject.isPremiumUser / hasPremium ──
+            UserObjectClass = find_class("org.telegram.messenger.UserObject")
+            if UserObjectClass:
+                class UserObjectIsPremiumHook(MethodHook):
+                    def after_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) > 0 and args[0] is not None:
+                                target = args[0]
+                                uid = int(getattr(target, "id", 0) or 0)
+                                if uid > 0:
+                                    if uid in plugin_self._get_my_active_uids() or uid in getattr(plugin_self, "_own_uids_cache", set()):
+                                        param.setResult(True)
+                                        return
+                                    prof = plugin_self.get_cached_profile(uid)
+                                    if prof and prof.get("premium"):
+                                        param.setResult(True)
+                                        return
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(UserObjectClass):
+                    try:
+                        if m.getName() in ("isPremiumUser", "hasPremium") and len(m.getParameterTypes()) == 1:
+                            m.setAccessible(True)
+                            un = self.hook_method(m, UserObjectIsPremiumHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception:
+                        pass
 
             # ── Hook ProfileActivity: добавлять ячейку SyncProfile в карточку профиля ──
             ProfileActivityClass = find_class("org.telegram.ui.ProfileActivity")
@@ -2205,7 +2384,7 @@ class Plugin(BasePlugin):
 
                 def ui_apply(patches=patches):
                     try:
-                        from org.telegram.messenger import UserConfig
+                        from org.telegram.messenger import UserConfig, MessagesController
                         for acc_idx, my_uid, nc, nbg, prc, pbg, em_id, prem in patches:
                             try:
                                 u_cfg = UserConfig.getInstance(acc_idx)
@@ -2219,6 +2398,20 @@ class Plugin(BasePlugin):
                                 # Прямые curr_u.color = ... триггерят NotificationCenter → сброс фрагментов.
                                 # _patch_user_tl_object имеет ранний выход «если уже выставлено».
                                 plugin_self._patch_user_tl_object(curr_u)
+
+                                # Разблокируем все вкладки папок, предотвращая сброс на «Все чаты»
+                                try:
+                                    mc = MessagesController.getInstance(acc_idx)
+                                    if mc and hasattr(mc, "dialogFilters"):
+                                        dfs = getattr(mc, "dialogFilters", None)
+                                        if dfs:
+                                            count = dfs.size() if hasattr(dfs, "size") else len(dfs)
+                                            for i in range(count):
+                                                f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
+                                                if f:
+                                                    f.locked = False
+                                except Exception:
+                                    pass
                             except Exception:
                                 pass
 
