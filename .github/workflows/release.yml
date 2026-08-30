@@ -16,12 +16,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Validate plugin editions
+        run: python build_plugins.py
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           name: ${{ github.ref_name }}
           files: |
-            sync.plugin
+            sync_ayugram.plugin
+            sync_exteragram.plugin
             zwylib.plugin
           generate_release_notes: true
           draft: false

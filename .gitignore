@@ -5,7 +5,6 @@ __pycache__/
 
 # Selfhosted / Server files
 server/
-tests/
 sync_profile.py
 sync_profile.plugin
 build_plugin.py

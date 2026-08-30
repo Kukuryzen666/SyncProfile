@@ -22,9 +22,10 @@
 
 ## 🚀 Установка (в 3 шага)
 
-1. **Скачайте плагины:**
-   - 📥 [**`sync.plugin`**](https://github.com/Kukuryzen666/SyncProfile/releases/latest/download/sync.plugin) — основной плагин.
-   - 📥 [**`zwylib.plugin`**](https://github.com/Kukuryzen666/SyncProfile/releases/latest/download/zwylib.plugin) — вспомогательная библиотека (если еще не установлена).
+1. **Скачайте подходящую версию плагина:**
+   - 📥 [**`sync_ayugram.plugin`**](https://github.com/Kukuryzen666/SyncProfile/releases/latest/download/sync_ayugram.plugin) — **Для клиентов AyuGram** (интеграция с нативным `localPremium`).
+   - 📥 [**`sync_exteragram.plugin`**](https://github.com/Kukuryzen666/SyncProfile/releases/latest/download/sync_exteragram.plugin) — **Для клиентов exteraGram** (встроенный нативный Local Premium, кастомные эмодзи и повышенные лимиты).
+   - 📥 [**`zwylib.plugin`**](https://github.com/Kukuryzen666/SyncProfile/releases/latest/download/zwylib.plugin) — Вспомогательная библиотека (если еще не установлена).
 2. **Установите в Telegram:**
    - Отправьте оба `.plugin` файла в «Избранное» (*Saved Messages*).
    - Нажмите на каждый файл -> выберите **«Установить плагин»** (*Install*).

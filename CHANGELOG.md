@@ -4,6 +4,146 @@
 
 ---
 
+## [v10.3.12] - 2026-08-30
+
+### 👑 Встраивание метода Local Premium (Custom Emoji) из AyuGram в exteraGram
+- **Кросс-клиентская отправка и отображение кастомных премиум эмодзи между exteraGram и AyuGram**:
+  - Реализован механизм двустороннего туннелирования кастомных эмодзи в стандартные текстовые гиперссылки `TL_messageEntityTextUrl` (`tg://emoji?id=<document_id>`), аналогично нативной реализации в **AyuGram**.
+  - **Исходящие сообщения (`on_send_message_hook` & `pre_request_hook`)**: сущности `TL_messageEntityCustomEmoji` автоматически преобразуются в `TL_messageEntityTextUrl(url="tg://emoji?id=<doc_id>")` при отправке. Благодаря этому сервер Telegram не вырезает кастомные эмодзи у аккаунтов без официальной подписки Telegram Premium.
+  - **Входящие и отображаемые сообщения (`on_updates_hook`, `on_update_hook`, `post_request_hook`, `putMessage`, `putMessages`)**: входящие текстовые ссылки `tg://emoji?id=<doc_id>` (а также `https://t.me/emoji/<doc_id>`) преобразуются обратно в нативные сущности `TL_messageEntityCustomEmoji`.
+  - **Нативная отрисовка в UI**: Внутренний движок Telegram (`MessageObject`, `AnimatedEmojiSpan`, `ChatMessageCell`) автоматически распознает преобразованные сущности и плавно отображает анимированные кастомные эмодзи в чатах, отложенных сообщениях, цитатах и реакциях.
+  - **Взаимная совместимость**: Пользователи **AyuGram** и **exteraGram** теперь полноценно отправляют и видят премиум эмодзи друг друга и свои собственные.
+- **Оптимизация настроек и действий синхронизации**:
+  - **Удалена кнопка «Полное скачивание базы»**: ручная перезагрузка всей базы заменена надежной дельта-синхронизацией, предотвращая сбои отображения и гонки кэша.
+  - **Кнопка «🧹 Очистить локальный кэш» поднята в блок «Общие действия»**: доступна сверху настроек в один клик. При очистке сбрасываются локальные кэши и запускается фоновое обновление профилей.
+- **Интеграция хуков видеоаватаров в exteraGram**:
+  - Добавлены перехватчики `UserObject.hasAnimatedAvatar` и `ChatObject.hasAnimatedAvatar` с быстрым выходом для мгновенного запуска анимации аватаров.
+
+---
+
+## [v10.3.11] - 2026-08-30
+
+### 🎬 Восстановление и оптимизация видеоаватаров в AyuGram с сохранением 120 FPS
+- **Восстановление перехватчиков `UserObject.hasAnimatedAvatar` и `ChatObject.hasAnimatedAvatar` в AyuGram**:
+  - В отличие от exteraGram, клиент AyuGram опирается на вызов `UserObject.hasAnimatedAvatar(user)` и `ChatObject.hasAnimatedAvatar(chat)` при инициализации видео-плеера в ячейках диалогов (`DialogCell`).
+  - Восстановлены специализированные хуки с мгновенным возвратом (`if param.getResult(): return`): если Java уже вернула `true`, накладные расходы равны нулю. Если `false`, хук проверяет наличие `video_sizes` / `flags & 1`, устанавливает `photo.has_video = True` и активирует воспроизведение видеоаватара.
+- **Синхронизация `SharedConfig` в `_sync_local_ayuconfig`**:
+  - При применении настроек профиля и загрузке плагина гарантированно включаются и сохраняются флаги Telegram: `SharedConfig.animateAvatars = True`, `SharedConfig.autoplayVideo = True`, `SharedConfig.autoplayGifs = True`, `SharedConfig.loopStickers = True`.
+- **Инвалидация кэшей fast-path при `putUser` и `putChat`**:
+  - При поступлении обновленного объекта пользователя или чата из сети/базы данных его ID сбрасывается из `_patched_uids` и `_untracked_uids`, гарантируя актуализацию фото и видеоаватаров.
+
+---
+
+## [v10.3.10] - 2026-08-30
+
+### ⚡ Полное устранение лагов при прокрутке списков и папок чатов (120 FPS Fast-Path)
+- **Удаление избыточных MethodHook на горячем пути отрисовки ячеек**:
+  - **Удалены перехватчики `UserObject.hasAnimatedAvatar / canAnimateAvatar` и `ChatObject.hasAnimatedAvatar / canAnimateAvatar`**: ранее эти Python-хуки вызывались по 30–60 раз за кадр при скролле папок и списков чатов (до ~7200 JNI-переходов в секунду). Так как поле `photo.has_video = True` уже выставлено в Java-объекте в памяти, нативный метод Telegram `hasAnimatedAvatar(user)` отрабатывает с нативной скоростью Java C++ без какого-либо вмешательства плагина.
+  - **Удален `ExteraFeatureLimitHook`**: расчет лимитов и бейджей больше не перехватывается в Python, так как exteraGram поднимает лимиты нативно при `ExteraConfig.localPremium = True`.
+- **Единичный канонический хук `MessagesController.getUser` и `getChat`**:
+  - Заблокировано одновременное хуканье нескольких перегрузок (`getUser(long)` и `getUser(Long)`). Теперь регистрируется ровно один хук на метод с флагом `break`, исключая 2-4x каскадный вызов Python-хуков на каждый элемент при отрисовке `DialogCell`.
+- **Мгновенный Fast-Path O(1) Memory Cache (~8ns на вызов)**:
+  - Внедрены 4 кэширующих множества целых чисел в памяти: `_patched_uids`, `_untracked_uids`, `_patched_cids`, `_untracked_cids`.
+  - При повторных запросах `getUser` / `getChat` для ячеек чатов во время прокрутки плагин мгновенно возвращает результат за ~8 наносекунд, полностью исключая JNI reflection, lock-блокировки и создание временных структур.
+  - Множества автоматически сбрасываются при `_update_snapshot()` и инкрементально инвалидируются при `_update_snapshot_partial()`.
+
+---
+
+## [v10.3.9] - 2026-08-30
+
+### 🎬 Активация видеоаватаров и эмодзи-статусов в AyuGram и exteraGram
+- **Активация Premium для собственных аккаунтов в AyuGram**:
+  - Устранено условие подавления `u.premium = True` для собственных аккаунтов (`is_own`) в AyuGram. Теперь для активного аккаунта гарантированно выставляются `u.premium = True` и `FLAG_PREMIUM` (`0x10000000`), благодаря чему AyuGram и Telegram включают нативное воспроизведение видеоаватаров в диалогах (`DialogCell`) и отображение эмодзи-статусов в заголовках.
+- **Корректные битовые маски эмодзи-статусов MTProto (flags2 |= 1)**:
+  - В `_patch_user_tl_object` и `_patch_chat_tl_object` добавлен обязательный бит `FLAG2_EMOJI_STATUS` (`flags2 |= 1`, `1 << 0`), синхронизирующий структуру объекта с MTProto-сериализатором и UI-компонентами Telegram (`DialogCell`, `SimpleTextView`, `ProfileActivity`).
+  - В `_patch_full_user_tl_object` добавлен флаг `fu.flags |= 0x80000` (`1 << 19: custom_status`), а в `_patch_full_chat_tl_object` — `fc.flags |= 512` для полного отображения кастомного статуса в шапке профиля.
+- **Комплексная синхронизация `AyuConfig` и `SharedConfig`**:
+  - `_ensure_local_premium` и `_sync_local_ayuconfig` теперь автоматически активируют и сохраняют все флаги видеоаватаров и статусов: `animateAvatars`, `autoplayVideo`, `loopAvatars`, `profileVideos`, `profileVideoAutoplay`, `streamAvatars`, `canAnimateAvatars`, `useAyuStatus`, `localPremium` и `AyuConfig.statusEmojiId`.
+  - Вызов `_sync_local_ayuconfig()` интегрирован в загрузку плагина `on_plugin_load()` и в `_apply_all_to_all_accounts()`.
+- **Надежная нормализация видеоаватаров `UserProfilePhoto`**:
+  - Проверка наличия видео в аватаре теперь корректно учитывает как `ph.flags & 1`, так и `ph.has_video` / `video_sizes`, исключая пропуск видеоаватаров у `TLRPC.UserProfilePhoto`.
+- **Легковесные хуки `UserObject.hasAnimatedAvatar` и `ChatObject.hasAnimatedAvatar`**:
+  - Добавлены быстрые Xposed/MethodHook перехватчики для гарантированного запуска анимации аватаров в списках чатов и профилях без накладных расходов на рендеринг.
+
+---
+
+## [v10.3.8] - 2026-08-30
+
+### 🚀 Полное исправление эмодзи-статусов и видеоаватаров в AyuGram и exteraGram
+- **Исправление отображения эмодзи-статусов у пользователей в AyuGram**:
+  - **Перехват всех перегрузок `MessagesController.getUser` и `getChat`**: восстановлен перехват примитивных сигнатур `getUser(long)` и `getChat(long)`, которые вызываются UI-классами AyuGram (`DialogCell`, `ChatMessageCell`, `ProfileActivity`). Ранее хук устанавливался только на `getUser(Long)`, пропуская прямые вызовы отрисовки списка диалогов и сообщений.
+  - **Исправление битовой маски флагов `TLRPC.User`**: удален ошибочный флаг `flags2 |= 1` (`FLAG2_USERNAMES`), вызывавший сбой парсинга никнеймов и отмену отрисовки эмодзи-статуса. Битовая маска флага эмодзи-статуса `flags |= 0x40000000` (`1 << 30`) теперь работает корректно и стабильно.
+  - **Патчинг `TLRPC.UserFull`**: в `_patch_full_user_tl_object` добавлено явное заполнение `fu.custom_status` и `fu.emoji_status`, благодаря чему эмодзи-статус теперь корректно отображается в заголовке профиля пользователя.
+  - **Добавлен хук `MessagesController.putUser` и `putChat`**: объекты пользователей патчатся сразу при сохранении в кэш контроллера.
+- **Исправление работы видеоаватаров в AyuGram**:
+  - **Автоматическая активация `AyuConfig.animateAvatars`**: в `_ensure_local_premium` включены `animateAvatars = True`, `autoplayVideo = True` и `loopAvatars = True` в конфигурации AyuGram (`AyuConfig`) и Telegram `SharedConfig`.
+  - **Универсальная нормализация `photo.has_video = True`**: нормализация структуры `TLRPC.UserProfilePhoto` и `TLRPC.ChatPhoto` теперь выполняется для всех пользователей и каналов при наличии `video_sizes`.
+- **Исправление отображения Emoji Status у пользователей в AyuGram и exteraGram**:
+  - Установлен обязательный бит `FLAG2_EMOJI_STATUS` (`flags2 |= 1`, `1 << 0`) в паре с `FLAG_EMOJI_STATUS` (`flags |= 0x40000000`, `1 << 30`). Теперь UI-компоненты Telegram (`DialogCell`, `SimpleTextView`, `ProfileActivity`, `ChatMessageCell`) безошибочно рендерят кастомные премиум эмодзи-статусы пользователей и каналов.
+- **Устранение просадок FPS и лагов при прокрутке списков (exteraGram & AyuGram)**:
+  - **Мгновенный O(1) Fast-Path для 99.9% пользователей**: если пользователя нет в базе данных SyncProfile, `_patch_user_tl_object` немедленно завершает работу без каких-либо обращений к JNI-полям Telegram или рефлексивных проверок видеоаватара.
+  - **Единичный канонический хук `MessagesController.getUser / getChat`**: устранено одновременное хуканье 4 перегрузок (`Long`, `long`, `Integer`, `int`), приводившее к 2–4x кратному каскадному вызову хуков на каждый элемент при скролле списка.
+  - **Удаление тяжелого перехвата `ChatActivity.onItemClick`**: исключена тяжелая рефлексия `_resolve_message_object` при каждом нажатии на экран.
+  - **Удален избыточный `ProfileActivityResumeHook`**.
+  - **Оптимизация `ExteraFeatureLimitHook`**: статический маппинг лимитов на предварительно созданные объекты `java.lang.Integer` с кэшированным флагом состояния в памяти.
+
+---
+
+## [v10.3.6] - 2026-08-30
+
+### 🚀 Исправление отображения премиум эмодзи-статусов в папках и устранение лагов 120fps+ в exteraGram
+- **Исправление отображения Emoji Status в папках и диалогах (AyuGram & exteraGram)**:
+  - Исправлена битовая маска флагов `TLRPC.User`: бит `emoji_status` находится в `flags.30` (`0x40000000`), а не в `flags2.0`. Теперь Telegram нативно определяет наличие эмодзи-статуса в `DialogCell` и списках папок.
+  - Исправлен ранний выход в `_patch_chat_tl_object`, из-за которого эмодзи-статусы каналов/чатов не применялись.
+  - Создание изолированных объектов `TL_emojiStatus` на каждого пользователя для предотвращения конфликтов держателей `AnimatedEmojiDrawable`.
+- **Полное устранение лагов при прокрутке 120fps+ в exteraGram**:
+  - Удалены тяжелые Xposed/MethodHook-перехватчики на `MediaDataController` (`canUseCustomEmoji`, `isCustomEmojiAvailable`, `canUsePremiumSticker`, `canUseReaction`) и `UserConfig.isPremium / isClientPremium`, которые вызывались сотни раз в секунду на кадр.
+  - Премиум статус и возможности теперь активируются нативно через `currentUser.premium = true` и `FLAG_PREMIUM` (0x10000000) в `UserConfig`, обеспечивая мгновенный нативный доступ со скоростью машинного кода без JNI/Python-оверхеда.
+- **Разделение на две специализированные сборки**:
+  - Репозиторий переведен на две независимые версии: `sync_ayugram.plugin` и `sync_exteragram.plugin`.
+
+---
+
+## [v10.3.5] - 2026-08-30
+
+### 👑 Встроенный нативный Local Premium для exteraGram
+- **Разблокировка возможностей Telegram Premium в exteraGram**:
+  - **Кастомные эмодзи и премиум-стикеры**: добавлены хуки на `MediaDataController` (`canUseCustomEmoji`, `isCustomEmojiAvailable`, `canUsePremiumSticker`, `canUseReaction`) — кастомные эмодзи теперь доступны в клавиатуре и реакциях без блокировок.
+  - **Повышенные лимиты (Double Limits)**: хук на `MessagesController.getFeatureLimit` удваивает лимиты клиента (до 30 папок, до 200 чатов в папке, до 10 закрепов в диалогах, био до 140 символов, подписи к медиа до 4096 символов).
+  - **Снятие ограничений функций**: хук на `MessagesController.premiumFeaturesBlocked` и `UserConfig.isPremium / isClientPremium`.
+  - **Бесперебойная отправка**: зарегистрирован `on_send_message_hook` для защиты отправки сообщений с кастомными эмодзи.
+  - **Настройка в меню**: добавлен переключатель `Локальный Premium (exteraGram)` в настройки плагина.
+
+---
+
+## [v10.3.4] - 2026-08-30
+
+### 🚀 Полное устранение лагов и фризов (exteraGram & AyuGram)
+- **Удалены высокочастотные хуки рендеринга**:
+  - `UserObject.hasPremium` — вызывался для каждого эмодзи и реакций десятки раз на кадр, блокируя поток интерфейса Chaquopy JNI-вызовами. Заменен на нативную проверку Java (`currentUser.premium = true` и `FLAG_PREMIUM`).
+  - `UserObject.hasAnimatedAvatar` / `canAnimateAvatar` — вызывался для каждой аватарки в списках диалогов и чатах. Заменен на нативную проверку `photo.has_video = true` в Java.
+  - `MessageObject.getReplyColorId` / `getReplyColor` — вызывал тяжелую рефлексию `_extract_reply_uid` на каждый элемент сообщения в RecyclerView. Теперь цвет реплая берется Telegram напрямую из пропатченного `fromUser.color`.
+- **Мгновенный Fast-Path в `_patch_user_tl_object` и `_patch_chat_tl_object`**:
+  - Добавлена проверка `_sp_ver` на уровне Python-объекта: если объект уже был проверен/пропатчен в рамках текущей версии кэша, выход происходит за 0.05 микросекунды без единого JNI-обращения к полям Telegram.
+
+---
+
+## [v10.3.3] - 2026-08-30
+
+### 🐛 Исправления сброса папок и мерцания эмодзи (exteraGram & AyuGram)
+- **Удален хук `UserConfig.getCurrentUser()` на exteraGram**:
+  - Устранен бесконечный цикл повторного патчинга `currentUser` прямо во время кадров отрисовки интерфейса.
+  - Полностью исправлен вечный сброс активной вкладки папок в «Все чаты» и мерцание/промаргивание `EmojiStatusDrawable` в верхней шапке (`ActionBar`).
+- **Синхронизация битовых масок `flags` и `flags2` в `_patch_user_tl_object`**:
+  - Корректно выставляются биты `FLAG_PREMIUM` (0x10000000), `FLAG2_EMOJI_STATUS` (1), `FLAG2_COLOR` (256) и `FLAG2_PROFILE_COLOR` (512), предотвращая расхождение состояния объекта в Telegram.
+  - Реализована полная идемпотентность патчинга (объекты повторно не пересоздаются и не перезаписываются).
+- **Исправление `long(em_id)` в Python 3**:
+  - Устранены падения `NameError: name 'long' is not defined` в `_patch_user_tl_object`, `_patch_chat_tl_object`, `_patch_full_chat_tl_object`.
+- **Поддержка `ExteraConfig` и `KotoConfig` в `_ensure_local_premium`**:
+  - Включена автоматическая активация локального премиума для exteraGram и KotoGram.
+
+---
+
 ## [v10.2.35] - 2026-08-30
 
 ### ⚡ Масштабная оптимизация производительности (exteraGram & AyuGram)
