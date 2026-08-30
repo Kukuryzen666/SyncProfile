@@ -40,6 +40,13 @@ class HookResult:
         for k, v in kwargs.items():
             setattr(self, k, v)
 
+class AppEvent:
+    START = 0
+    RESUME = 1
+    PAUSE = 2
+    STOP = 3
+
+base_plugin_mock.AppEvent = AppEvent
 base_plugin_mock.BasePlugin = BasePlugin
 base_plugin_mock.MethodHook = MethodHook
 base_plugin_mock.HookResult = HookResult
@@ -59,12 +66,25 @@ sys.modules["ui"] = ui_mock
 sys.modules["ui.bulletin"] = ui_bulletin_mock
 
 ui_settings_mock = types.ModuleType("ui.settings")
-ui_settings_mock.Divider = lambda **kw: ("Divider", kw)
-ui_settings_mock.Header = lambda **kw: ("Header", kw)
-ui_settings_mock.Input = lambda **kw: ("Input", kw)
-ui_settings_mock.Selector = lambda **kw: ("Selector", kw)
-ui_settings_mock.Switch = lambda **kw: ("Switch", kw)
-ui_settings_mock.Text = lambda **kw: ("Text", kw)
+def _mock_divider(text=None):
+    return ("Divider", {"text": text})
+def _mock_header(text=""):
+    return ("Header", {"text": text})
+def _mock_input(key, text, default="", subtext=None, icon=None, on_change=None):
+    return ("Input", {"key": key, "text": text, "default": default, "subtext": subtext, "icon": icon, "on_change": on_change})
+def _mock_selector(key, text, default=0, items=None, icon=None, on_change=None):
+    return ("Selector", {"key": key, "text": text, "default": default, "items": items, "icon": icon, "on_change": on_change})
+def _mock_switch(key, text, default=False, subtext=None, icon=None, on_change=None):
+    return ("Switch", {"key": key, "text": text, "default": default, "subtext": subtext, "icon": icon, "on_change": on_change})
+def _mock_text(text, subtext=None, icon=None, accent=False, red=False, on_click=None):
+    return ("Text", {"text": text, "subtext": subtext, "icon": icon, "accent": accent, "red": red, "on_click": on_click})
+
+ui_settings_mock.Divider = _mock_divider
+ui_settings_mock.Header = _mock_header
+ui_settings_mock.Input = _mock_input
+ui_settings_mock.Selector = _mock_selector
+ui_settings_mock.Switch = _mock_switch
+ui_settings_mock.Text = _mock_text
 sys.modules["ui.settings"] = ui_settings_mock
 
 tgnet_mock = types.ModuleType("org.telegram.tgnet")
@@ -548,12 +568,16 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
         self.assertIn(222, parsed_profs)
 
     def test_create_settings_has_switches(self):
-        module = load_plugin_module()
-        plugin = module.Plugin()
-        items = plugin.create_settings()
-        
-        keys = [item[1].get("key") for item in items if isinstance(item, tuple) and item[0] == "Switch"]
-        self.assertIn("enable_sync", keys)
+        for mod_file in ["sync_ayugram.plugin", "sync_exteragram.plugin"]:
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+            items = plugin.create_settings()
+            self.assertIsInstance(items, list)
+            self.assertGreater(len(items), 5)
+            
+            keys = [item[1].get("key") for item in items if isinstance(item, tuple) and item[0] in ("Switch", "Selector", "Input")]
+            self.assertIn("enable_sync", keys)
+            self.assertIn("auto_sync_interval", keys)
 
     def test_ayugram_client_detection(self):
         module = load_plugin_module()
@@ -812,37 +836,33 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
         self.assertIsInstance(params.entities[0], MockTLRPC.TL_messageEntityTextUrl)
         self.assertEqual(params.entities[0].url, "tg://emoji?id=777888999")
 
-    def test_exteragram_pre_request_hook_converts_emojis(self):
+    def test_exteragram_on_send_message_hook_converts_emojis(self):
         module = load_plugin_module("sync_exteragram.plugin")
         plugin = module.Plugin()
 
-        class MockRequest:
+        class MockParams:
             def __init__(self, entities):
                 self.entities = entities
 
-        req = MockRequest([MockTLRPC.TL_messageEntityCustomEmoji(0, 2, 1122334455)])
-        res = plugin.pre_request_hook("messages.sendMessage", 0, req)
+        params = MockParams([MockTLRPC.TL_messageEntityCustomEmoji(0, 2, 1122334455)])
+        res = plugin.on_send_message_hook(0, params)
         self.assertEqual(res.strategy, module.HookStrategy.MODIFY)
-        self.assertIsInstance(req.entities[0], MockTLRPC.TL_messageEntityTextUrl)
-        self.assertEqual(req.entities[0].url, "tg://emoji?id=1122334455")
+        self.assertIsInstance(params.entities[0], MockTLRPC.TL_messageEntityTextUrl)
+        self.assertEqual(params.entities[0].url, "tg://emoji?id=1122334455")
 
-    def test_exteragram_post_request_and_updates_hook_converts_emojis(self):
+    def test_exteragram_convert_emojis_to_and_from_urls(self):
         module = load_plugin_module("sync_exteragram.plugin")
-        plugin = module.Plugin()
 
-        msg = MockTLRPC.Message("Test", [MockTLRPC.TL_messageEntityTextUrl(0, 4, "tg://emoji?id=999111222")])
-        resp = MockTLRPC.TL_messages_messages([msg])
+        # Custom emoji -> Text url
+        ents = [MockTLRPC.TL_messageEntityCustomEmoji(0, 4, 999111222)]
+        conv_urls = module._convert_custom_emojis_to_text_urls(ents)
+        self.assertIsInstance(conv_urls[0], MockTLRPC.TL_messageEntityTextUrl)
+        self.assertEqual(conv_urls[0].url, "tg://emoji?id=999111222")
 
-        plugin.post_request_hook("messages.getHistory", 0, resp, None)
-        self.assertIsInstance(msg.entities[0], MockTLRPC.TL_messageEntityCustomEmoji)
-        self.assertEqual(msg.entities[0].document_id, 999111222)
-
-        # Update hook
-        msg2 = MockTLRPC.Message("New", [MockTLRPC.TL_messageEntityTextUrl(0, 3, "tg://emoji?id=333444555")])
-        upd = MockTLRPC.TL_updateNewMessage(msg2)
-        plugin.on_update_hook("TL_updateNewMessage", 0, upd)
-        self.assertIsInstance(msg2.entities[0], MockTLRPC.TL_messageEntityCustomEmoji)
-        self.assertEqual(msg2.entities[0].document_id, 333444555)
+        # Text url -> Custom emoji
+        conv_emojis = module._convert_text_urls_to_custom_emojis(conv_urls)
+        self.assertIsInstance(conv_emojis[0], MockTLRPC.TL_messageEntityCustomEmoji)
+        self.assertEqual(conv_emojis[0].document_id, 999111222)
 
     def test_exteragram_settings_has_local_premium_switch(self):
         module = load_plugin_module("sync_exteragram.plugin")
@@ -935,55 +955,136 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             }
             plugin._update_snapshot()
 
-            # First patch calls populate fast-path sets
+            # First patch call sets properties
             self.assertTrue(plugin._patch_user_tl_object(tracked_u))
-            self.assertIn(111222, plugin._patched_uids)
-            self.assertFalse(plugin._patch_user_tl_object(untracked_u))
-            self.assertIn(333444, plugin._untracked_uids)
-
-            # Subsequent patch calls hit O(1) integer set cache immediately
-            self.assertTrue(plugin._patch_user_tl_object(tracked_u))
+            self.assertEqual(tracked_u.color.color, 3)
+            self.assertEqual(tracked_u.profile_color.color, 4)
+            self.assertEqual(tracked_u.emoji_status.document_id, 55555)
+            self.assertTrue(tracked_u.premium)
             self.assertFalse(plugin._patch_user_tl_object(untracked_u))
 
-            # Test partial snapshot invalidation for users
-            plugin._update_snapshot_partial({111222})
-            self.assertNotIn(111222, plugin._patched_uids)
-            self.assertIn(333444, plugin._untracked_uids)
+            # Simulate Telegram recreating the Java TLRPC.User object from SQLite / MTProto (e.g. after 10 min idle)
+            fresh_u = MockUser(uid=111222)
+            self.assertIsNone(fresh_u.color)
+            self.assertIsNone(fresh_u.emoji_status)
+            self.assertFalse(fresh_u.premium)
 
-            # Chats fast-path sets
-            tracked_c = MockChat(cid=555666)
-            untracked_c = MockChat(cid=777888)
+            # Patching fresh_u MUST succeed and apply color, emoji status, and premium!
+            self.assertTrue(plugin._patch_user_tl_object(fresh_u))
+            self.assertIsNotNone(fresh_u.color)
+            self.assertEqual(fresh_u.color.color, 3)
+            self.assertIsNotNone(fresh_u.emoji_status)
+            self.assertEqual(fresh_u.emoji_status.document_id, 55555)
+            self.assertTrue(fresh_u.premium)
+
+            # Chats: verify fresh instance patching
             plugin._chats_cache[555666] = {
                 "chat_id": 555666,
                 "name_color": 1,
                 "profile_color": 2,
+                "emoji_status_id": 77777,
             }
             plugin._update_snapshot()
+            tracked_c = MockChat(cid=555666)
             self.assertTrue(plugin._patch_chat_tl_object(tracked_c))
-            self.assertIn(555666, plugin._patched_cids)
-            self.assertFalse(plugin._patch_chat_tl_object(untracked_c))
-            self.assertIn(777888, plugin._untracked_cids)
+            self.assertEqual(tracked_c.color.color, 1)
+            self.assertEqual(tracked_c.profile_color.color, 2)
+            self.assertEqual(tracked_c.emoji_status.document_id, 77777)
 
-            # Test partial snapshot invalidation for chats
-            plugin._update_snapshot_partial({555666})
-            self.assertNotIn(555666, plugin._patched_cids)
-            self.assertIn(777888, plugin._untracked_cids)
+            # Fresh chat instance
+            fresh_c = MockChat(cid=555666)
+            self.assertTrue(plugin._patch_chat_tl_object(fresh_c))
+            self.assertEqual(fresh_c.color.color, 1)
 
-            # Test full snapshot invalidation
+    def test_auto_sync_interval_helper(self):
+        for fname in ["sync_ayugram.plugin", "sync_exteragram.plugin"]:
+            module = load_plugin_module(fname)
+            plugin = module.Plugin()
+
+            # Default index 1 -> 120s
+            plugin.set_setting("auto_sync_interval", 1)
+            self.assertEqual(plugin._get_sync_interval_seconds(), 120)
+
+            # Index 0 -> 60s
+            plugin.set_setting("auto_sync_interval", 0)
+            self.assertEqual(plugin._get_sync_interval_seconds(), 60)
+
+            # Index 2 -> 300s
+            plugin.set_setting("auto_sync_interval", 2)
+            self.assertEqual(plugin._get_sync_interval_seconds(), 300)
+
+            # Index 3 -> 600s
+            plugin.set_setting("auto_sync_interval", 3)
+            self.assertEqual(plugin._get_sync_interval_seconds(), 600)
+
+            # Index 4 -> 900s
+            plugin.set_setting("auto_sync_interval", 4)
+            self.assertEqual(plugin._get_sync_interval_seconds(), 900)
+
+            # Out of bounds -> fallback 120s
+            plugin.set_setting("auto_sync_interval", 99)
+            self.assertEqual(plugin._get_sync_interval_seconds(), 120)
+
+    def test_clear_cache_action(self):
+        for fname in ["sync_ayugram.plugin", "sync_exteragram.plugin"]:
+            module = load_plugin_module(fname)
+            plugin = module.Plugin()
+
+            # Mock sync_database to prevent real network calls
+            sync_db_called = []
+            plugin._sync_database = lambda show_bulletin=False, force_clean=True: sync_db_called.append((show_bulletin, force_clean))
+
+            plugin._profiles_cache[99999] = {"user_id": 99999, "name_color": 3}
+            plugin._chats_cache[88888] = {"chat_id": 88888, "name_color": 4}
+            plugin.set_setting("_last_sync_timestamp", 12345678)
             plugin._update_snapshot()
-            self.assertEqual(len(plugin._patched_uids), 0)
-            self.assertEqual(len(plugin._untracked_uids), 0)
-            self.assertEqual(len(plugin._patched_cids), 0)
-            self.assertEqual(len(plugin._untracked_cids), 0)
+
+            plugin._clear_cache_action()
+
+            # Verify timestamp was reset
+            self.assertEqual(plugin.get_setting("_last_sync_timestamp"), 0)
+            # Verify foreign profiles were cleared from cache
+            self.assertNotIn(99999, plugin._profiles_cache)
+            self.assertNotIn(88888, plugin._chats_cache)
+            # Verify full database fetch was triggered with force_clean=True
+            self.assertTrue(len(sync_db_called) > 0)
+            self.assertTrue(sync_db_called[0][1])
+
+    def test_on_app_event_resume(self):
+        for fname in ["sync_ayugram.plugin", "sync_exteragram.plugin"]:
+            module = load_plugin_module(fname)
+            plugin = module.Plugin()
+
+            delta_sync_called = []
+            plugin.sync_delta_updates_from_server = lambda show_bulletin=False: delta_sync_called.append(show_bulletin)
+
+            # 1. Last sync timestamp was recent -> no sync needed
+            import time
+            plugin.set_setting("_last_sync_timestamp", int(time.time()))
+            plugin.set_setting("auto_sync_interval", 1)  # 120s
+            plugin.on_app_event(module.AppEvent.RESUME)
+            self.assertEqual(len(delta_sync_called), 0)
+
+            # 2. Last sync timestamp was 15 minutes ago (expired) -> triggers sync
+            plugin.set_setting("_last_sync_timestamp", int(time.time()) - 900)
+            plugin.on_app_event(module.AppEvent.RESUME)
+            self.assertEqual(len(delta_sync_called), 1)
 
     def test_ayugram_video_avatar_hooks_registered(self):
-        class MockJavaMethod:
+        class MockParamType:
             def __init__(self, name):
                 self._name = name
             def getName(self):
                 return self._name
+
+        class MockJavaMethod:
+            def __init__(self, name):
+                self._name = name
+                self._param_types = [MockParamType("long")] if name in ("getUser", "getChat", "getUserFull", "getChatFull") else [MockParamType("org.telegram.tgnet.TLRPC$User")]
+            def getName(self):
+                return self._name
             def getParameterTypes(self):
-                return []
+                return self._param_types
             def setAccessible(self, val):
                 pass
 
@@ -998,49 +1099,232 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
 
         fake_classes = {
             "org.telegram.messenger.MessagesController": MockJavaClass(["getUser", "getChat", "getUserFull", "getChatFull", "putUser", "putChat"]),
-            "org.telegram.ui.Cells.ChatMessageCell": MockJavaClass(["createMenu"]),
-            "org.telegram.ui.ChatActivity": MockJavaClass(["createMenu"]),
-            "org.telegram.messenger.UserObject": MockJavaClass(["hasAnimatedAvatar", "canAnimateAvatar"]),
-            "org.telegram.messenger.ChatObject": MockJavaClass(["hasAnimatedAvatar", "canAnimateAvatar"]),
         }
 
         orig_find_class = module.find_class
         try:
             module.find_class = lambda name: fake_classes.get(name)
             plugin._register_xposed_hooks()
-            # Verify hooks were registered
+            # Verify MessagesController hooks were registered
             self.assertGreater(len(plugin._xposed_unhooks), 0)
         finally:
             module.find_class = orig_find_class
 
-    def test_ayugram_and_exteragram_plugin_files_exist_and_valid(self):
-        import importlib.util
-        from importlib.machinery import SourceFileLoader
+    def test_exteragram_fast_emoji_doc_id_extraction(self):
+        module = load_plugin_module("sync_exteragram.plugin")
+        extract_fn = module._extract_emoji_doc_id_from_url
 
-        root = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
-        
-        # Check AyuGram build
-        ayu_path = os.path.join(root, "sync_ayugram.plugin")
-        self.assertTrue(os.path.exists(ayu_path))
-        ayu_loader = SourceFileLoader("sync_ayugram", ayu_path)
-        ayu_spec = importlib.util.spec_from_loader("sync_ayugram", ayu_loader)
-        ayu_mod = importlib.util.module_from_spec(ayu_spec)
-        ayu_spec.loader.exec_module(ayu_mod)
-        self.assertEqual(ayu_mod.__id__, "sync_profile_ayugram")
-        self.assertIn("AyuGram", ayu_mod.__name__)
-        self.assertEqual(ayu_mod.__version__, "10.3.12")
+        # Test valid emoji urls
+        self.assertEqual(extract_fn("tg://emoji?id=543219876"), 543219876)
+        self.assertEqual(extract_fn("tg://custom-emoji?id=12345&foo=bar"), 12345)
+        self.assertEqual(extract_fn("https://t.me/emoji/99887766?test=1"), 99887766)
+        self.assertEqual(extract_fn("t.me/emoji/11223344"), 11223344)
 
-        # Check exteraGram build
-        extera_path = os.path.join(root, "sync_exteragram.plugin")
-        self.assertTrue(os.path.exists(extera_path))
-        extera_loader = SourceFileLoader("sync_exteragram", extera_path)
-        extera_spec = importlib.util.spec_from_loader("sync_exteragram", extera_loader)
-        extera_mod = importlib.util.module_from_spec(extera_spec)
-        extera_spec.loader.exec_module(extera_mod)
-        self.assertEqual(extera_mod.__id__, "sync_profile_exteragram")
-        self.assertIn("exteraGram", extera_mod.__name__)
-        self.assertEqual(extera_mod.__version__, "10.3.12")
+        # Test non-emoji urls (must quickly return None without errors)
+        self.assertIsNone(extract_fn("https://google.com"))
+        self.assertIsNone(extract_fn("https://t.me/durov"))
+        self.assertIsNone(extract_fn(""))
+        self.assertIsNone(extract_fn(None))
+
+    def test_exteragram_message_entities_patching_and_sp_flag(self):
+        module = load_plugin_module("sync_exteragram.plugin")
+
+        class MockEntityTextUrl:
+            def __init__(self, url, offset=0, length=2):
+                self.url = url
+                self.offset = offset
+                self.length = length
+
+        class MockMessage:
+            def __init__(self, entities):
+                self.entities = entities
+
+        # 1. Message with emoji url
+        ent1 = MockEntityTextUrl("tg://emoji?id=777888")
+        ent2 = MockEntityTextUrl("https://example.com")
+        msg = MockMessage([ent1, ent2])
+
+        module._patch_message_entities(msg)
+        self.assertTrue(getattr(msg, "_sp_p", False))
+        self.assertEqual(len(msg.entities), 2)
+        self.assertEqual(msg.entities[0].document_id, 777888)
+        self.assertEqual(msg.entities[1].url, "https://example.com")
+
+        # 2. Second patch call should immediately skip due to _sp_p
+        orig_ents = msg.entities
+        module._patch_message_entities(msg)
+        self.assertIs(msg.entities, orig_ents)
+
+    def test_exteragram_sync_in_progress_guard(self):
+        module = load_plugin_module("sync_exteragram.plugin")
+        plugin = module.Plugin()
+        self.assertFalse(plugin._sync_in_progress)
+
+        plugin._sync_in_progress = True
+        # Calling _sync_database while in progress should exit immediately
+        plugin._sync_database(show_bulletin=False)
+        self.assertTrue(plugin._sync_in_progress)
+        plugin._sync_in_progress = False
+
+    def test_profile_activity_cell_injection(self):
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+
+            plugin._profiles_snapshot = {
+                1001: {"name_color": 1, "profile_color": 2, "emoji_status_id": 0}
+            }
+
+            class MockViewClass:
+                def __init__(self, simple_name):
+                    self._simple_name = simple_name
+                def getSimpleName(self):
+                    return self._simple_name
+
+            class MockTextDetailCell:
+                def __init__(self, ctx=None):
+                    self.text = ""
+                    self.subtext = ""
+                    self.need_divider = False
+                    self.tag = None
+                    self.click_listener = None
+                def getClass(self):
+                    return MockViewClass("TextDetailCell")
+                def setTextAndValue(self, text, subtext, need_divider=False):
+                    self.text = text
+                    self.subtext = subtext
+                    self.need_divider = need_divider
+                def setTag(self, tag):
+                    self.tag = tag
+                def setOnClickListener(self, listener):
+                    self.click_listener = listener
+
+            class MockLinearLayout:
+                def __init__(self):
+                    self.children = []
+                def getClass(self):
+                    return MockViewClass("LinearLayout")
+                def getChildCount(self):
+                    return len(self.children)
+                def getChildAt(self, i):
+                    return self.children[i]
+                def addView(self, view):
+                    self.children.append(view)
+                def findViewWithTag(self, tag):
+                    for c in self.children:
+                        if getattr(c, "tag", None) == tag:
+                            return c
+                    return None
+
+            class MockFragment:
+                def __init__(self, uid, ll):
+                    self.user_id = uid
+                    self.linearLayout = ll
+                def getFragmentView(self):
+                    return self.linearLayout
+                def getParentActivity(self):
+                    return "MockActivityContext"
+
+            orig_find_class = module.find_class
+            try:
+                module.find_class = lambda name: MockTextDetailCell if name == "org.telegram.ui.Cells.TextDetailCell" else None
+
+                ll = MockLinearLayout()
+                # Simulate existing child (birthday cell)
+                existing_child = MockTextDetailCell()
+                existing_child.needDivider = False
+                ll.addView(existing_child)
+
+                frag = MockFragment(1001, ll)
+                plugin._inject_profile_activity_cell(frag)
+
+                # Verify cell was injected
+                self.assertEqual(len(ll.children), 2)
+                injected = ll.children[1]
+                self.assertEqual(injected.text, "Этот пользователь использует SyncProfile")
+                self.assertEqual(injected.subtext, "SyncProfile")
+                self.assertEqual(injected.tag, "syncprofile_detail_cell")
+                self.assertTrue(existing_child.needDivider)
+
+                # Duplicate call should not add duplicate cell
+                plugin._inject_profile_activity_cell(frag)
+                self.assertEqual(len(ll.children), 2)
+
+                # Non-sync user should not inject
+                ll2 = MockLinearLayout()
+                frag2 = MockFragment(9999, ll2)
+                plugin._inject_profile_activity_cell(frag2)
+                self.assertEqual(len(ll2.children), 0)
+
+                # Own user ID should also inject
+                plugin._get_my_active_uids = lambda: [5555]
+                ll3 = MockLinearLayout()
+                frag3 = MockFragment(5555, ll3)
+                plugin._inject_profile_activity_cell(frag3)
+                self.assertEqual(len(ll3.children), 1)
+                self.assertEqual(ll3.children[0].text, "Этот пользователь использует SyncProfile")
+            finally:
+                module.find_class = orig_find_class
+
+    def test_user_full_and_chat_full_permanent_signature(self):
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+
+            plugin._profiles_snapshot = {
+                1001: {"name_color": 1, "profile_color": 2, "emoji_status_id": 0}
+            }
+            plugin._chats_snapshot = {
+                2002: {"name_color": 3, "profile_color": 4, "emoji_status_id": 0}
+            }
+
+            class MockUserFull:
+                def __init__(self, uid, about=""):
+                    self.id = uid
+                    self.about = about
+                    self.flags = 0
+                    self.color = None
+                    self.profile_color = None
+                    self.custom_status = None
+                    self.emoji_status = None
+                    self.user = None
+
+            class MockChatFull:
+                def __init__(self, cid, about=""):
+                    self.id = cid
+                    self.about = about
+                    self.flags = 0
+                    self.color = None
+                    self.profile_color = None
+                    self.custom_status = None
+                    self.emoji_status = None
+                    self.chat = None
+                    self.boosts_applied = 0
+
+            # 1. Peer in sync db with existing bio
+            fu1 = MockUserFull(1001, "Hello world")
+            plugin._patch_full_user_tl_object(fu1, 1001)
+            self.assertIn("Hello world", fu1.about)
+            self.assertIn("⚡ Этот пользователь использует SyncProfile", fu1.about)
+            self.assertTrue(bool(fu1.flags & 2))
+
+            # 2. Own account should also receive the signature
+            plugin._get_my_active_uids = lambda: [5555]
+            plugin._get_active_accounts_data = lambda: [{"acc_idx": 0, "user_id": 5555}]
+            fu_own = MockUserFull(5555, "My own bio")
+            plugin._patch_full_user_tl_object(fu_own, 5555)
+            self.assertIn("My own bio", fu_own.about)
+            self.assertIn("⚡ Этот пользователь использует SyncProfile", fu_own.about)
+            self.assertTrue(bool(fu_own.flags & 2))
+
+            # 3. ChatFull
+            fc1 = MockChatFull(2002, "Channel bio")
+            plugin._patch_full_chat_tl_object(fc1, 2002)
+            self.assertIn("Channel bio", fc1.about)
+            self.assertIn("⚡ Этот чат/канал использует SyncProfile", fc1.about)
+            self.assertTrue(bool(fc1.flags & 2))
 
 if __name__ == "__main__":
     unittest.main()
+
 
