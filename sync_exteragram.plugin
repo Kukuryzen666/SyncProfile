@@ -91,7 +91,7 @@ __id__ = "sync_profile_exteragram"
 __name__ = "SyncProfile [exteraGram]"
 __description__ = "Синхронизация кастомного профиля и встроенный Local Premium (отправка и отображение кастомных эмодзи, повышенные лимиты, премиум стикеры/реакции) для клиентов exteraGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.14"
+__version__ = "10.3.15"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -623,6 +623,27 @@ class Plugin(BasePlugin):
         except Exception:
             pass
 
+        # Регистрируем хуки на отправку и получение сообщений для кастомных эмодзи
+        for req in (
+            "messages.sendMessage",
+            "messages.sendMedia",
+            "messages.sendMultiMedia",
+            "messages.editMessage",
+            "messages.getHistory",
+            "messages.getMessages",
+            "messages.getDiscussionMessage",
+        ):
+            try:
+                self.add_hook(req, match_substring=False, priority=0)
+            except Exception:
+                pass
+
+        for upd in ("Updates", "UpdateShort", "updateNewMessage", "updateNewChannelMessage", "updateEditMessage", "updateEditChannelMessage"):
+            try:
+                self.add_hook(upd, match_substring=True, priority=0)
+            except Exception:
+                pass
+
         if HAS_ZWYLIB:
             async_manager.run_task(self._async_initial_background_sync())
             async_manager.run_task(self._async_keep_alive_sync_loop())
@@ -646,6 +667,74 @@ class Plugin(BasePlugin):
                     return HookResult(strategy=HookStrategy.MODIFY, params=params)
         except Exception as e:
             log(f"SyncProfile: on_send_message_hook error: {e}")
+        return HookResult(strategy=HookStrategy.DEFAULT)
+
+    def pre_request_hook(self, request_name: str, account: int, request: Any) -> HookResult:
+        """Перехват исходящих MTProto-запросов отправки сообщений:
+        преобразует TL_messageEntityCustomEmoji -> TL_messageEntityTextUrl (tg://emoji?id=...)
+        чтобы сервер Telegram не вырезал премиум-эмодзи."""
+        if not request:
+            return HookResult(strategy=HookStrategy.DEFAULT)
+        try:
+            modified = False
+            ents = getattr(request, "entities", None)
+            if ents:
+                new_ents = _convert_custom_emojis_to_text_urls(ents)
+                if new_ents is not ents:
+                    request.entities = new_ents
+                    modified = True
+
+            multi_media = getattr(request, "multi_media", None)
+            if multi_media:
+                is_java_list = hasattr(multi_media, "size") and hasattr(multi_media, "get")
+                mm_count = multi_media.size() if is_java_list else len(multi_media)
+                for i in range(mm_count):
+                    single_m = multi_media.get(i) if is_java_list else multi_media[i]
+                    if single_m and hasattr(single_m, "entities"):
+                        s_ents = getattr(single_m, "entities", None)
+                        if s_ents:
+                            new_s_ents = _convert_custom_emojis_to_text_urls(s_ents)
+                            if new_s_ents is not s_ents:
+                                single_m.entities = new_s_ents
+                                modified = True
+
+            if modified:
+                return HookResult(strategy=HookStrategy.MODIFY, request=request)
+        except Exception as e:
+            log(f"SyncProfile: pre_request_hook error: {e}")
+        return HookResult(strategy=HookStrategy.DEFAULT)
+
+    def post_request_hook(self, request_name: str, account: int, response: Any, error: Any) -> HookResult:
+        """Перехват входящих ответов MTProto с сообщениями:
+        преобразует tg://emoji?id=... обратно в TL_messageEntityCustomEmoji для анимированного UI."""
+        if error or not response:
+            return HookResult(strategy=HookStrategy.DEFAULT)
+        try:
+            _patch_messages_in_response(response)
+        except Exception:
+            pass
+        return HookResult(strategy=HookStrategy.DEFAULT)
+
+    def on_updates_hook(self, container_name: str, account: int, updates: Any) -> HookResult:
+        """Перехват контейнеров Updates (живые обновления чатов)."""
+        if not updates:
+            return HookResult(strategy=HookStrategy.DEFAULT)
+        try:
+            _patch_messages_in_response(updates)
+        except Exception:
+            pass
+        return HookResult(strategy=HookStrategy.DEFAULT)
+
+    def on_update_hook(self, update_name: str, account: int, update: Any) -> HookResult:
+        """Перехват одиночных Update."""
+        if not update:
+            return HookResult(strategy=HookStrategy.DEFAULT)
+        try:
+            msg = getattr(update, "message", None)
+            if msg:
+                _patch_message_entities(msg)
+        except Exception:
+            pass
         return HookResult(strategy=HookStrategy.DEFAULT)
 
     def on_app_event(self, event_type: AppEvent):
@@ -1626,6 +1715,33 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
+                class PutMessageHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) >= 1:
+                                m_arg = args[0]
+                                if m_arg:
+                                    _patch_message_entities(m_arg)
+                        except Exception:
+                            pass
+
+                class PutMessagesHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) >= 1:
+                                ms_arg = args[0]
+                                if ms_arg:
+                                    is_j = hasattr(ms_arg, "size") and hasattr(ms_arg, "get")
+                                    c = ms_arg.size() if is_j else len(ms_arg)
+                                    for i in range(c):
+                                        m = ms_arg.get(i) if is_j else ms_arg[i]
+                                        if m:
+                                            _patch_message_entities(m)
+                        except Exception:
+                            pass
+
                 methods = _get_class_methods(MessagesControllerClass)
 
                 # Hook ONLY ONE canonical overload to avoid cascade overhead on hot paths
@@ -1635,6 +1751,8 @@ class Plugin(BasePlugin):
                 chat_full_hooked = False
                 put_user_hooked = False
                 put_chat_hooked = False
+                put_message_hooked = False
+                put_messages_hooked = False
 
                 for m in methods:
                     try:
@@ -1686,6 +1804,20 @@ class Plugin(BasePlugin):
                                 if unhook:
                                     self._xposed_unhooks.append(unhook)
                                     put_chat_hooked = True
+                        elif not put_message_hooked and m_name == "putMessage" and num_params >= 1:
+                            p0_name = p_types[0].getName()
+                            if "Message" in p0_name:
+                                m.setAccessible(True)
+                                unhook = self.hook_method(m, PutMessageHook())
+                                if unhook:
+                                    self._xposed_unhooks.append(unhook)
+                                    put_message_hooked = True
+                        elif not put_messages_hooked and m_name == "putMessages" and num_params >= 1:
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, PutMessagesHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                                put_messages_hooked = True
                     except Exception as e:
                         log(f"SyncProfile: hook MessagesController method {m} error: {e}")
 

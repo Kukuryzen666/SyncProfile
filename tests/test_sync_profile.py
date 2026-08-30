@@ -1324,6 +1324,52 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             self.assertIn("⚡ Этот чат/канал использует SyncProfile", fc1.about)
             self.assertTrue(bool(fc1.flags & 2))
 
+    def test_exteragram_custom_emoji_pre_post_request_hooks(self):
+        module = load_plugin_module("sync_exteragram.plugin")
+        plugin = module.Plugin()
+
+        class MockTLRPC:
+            class TL_messageEntityCustomEmoji:
+                def __init__(self, offset=0, length=2, document_id=123456789):
+                    self.offset = offset
+                    self.length = length
+                    self.document_id = document_id
+            class TL_messageEntityTextUrl:
+                def __init__(self, offset=0, length=2, url=""):
+                    self.offset = offset
+                    self.length = length
+                    self.url = url
+
+        module.TLRPC = MockTLRPC
+
+        # 1. Test pre_request_hook converts TL_messageEntityCustomEmoji -> TL_messageEntityTextUrl
+        class MockSendMessageRequest:
+            def __init__(self):
+                self.entities = [MockTLRPC.TL_messageEntityCustomEmoji(0, 2, 9988776655)]
+                self.multi_media = None
+
+        req = MockSendMessageRequest()
+        res = plugin.pre_request_hook("messages.sendMessage", 0, req)
+        self.assertEqual(res.strategy, module.HookStrategy.MODIFY)
+        self.assertEqual(len(req.entities), 1)
+        self.assertIsInstance(req.entities[0], MockTLRPC.TL_messageEntityTextUrl)
+        self.assertEqual(req.entities[0].url, "tg://emoji?id=9988776655")
+
+        # 2. Test post_request_hook / on_update_hook converts tg://emoji?id=... back to TL_messageEntityCustomEmoji
+        class MockMessage:
+            def __init__(self):
+                self.entities = [MockTLRPC.TL_messageEntityTextUrl(0, 2, "tg://emoji?id=9988776655")]
+
+        class MockUpdate:
+            def __init__(self):
+                self.message = MockMessage()
+
+        upd = MockUpdate()
+        plugin.on_update_hook("updateNewMessage", 0, upd)
+        self.assertEqual(len(upd.message.entities), 1)
+        self.assertIsInstance(upd.message.entities[0], MockTLRPC.TL_messageEntityCustomEmoji)
+        self.assertEqual(upd.message.entities[0].document_id, 9988776655)
+
 if __name__ == "__main__":
     unittest.main()
 

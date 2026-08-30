@@ -4,6 +4,16 @@
 
 ---
 
+## [v10.3.15] - 2026-08-30
+
+### 🔓 Восстановление отправки и отображения премиум-эмодзи в exteraGram
+- **MTProto Request & Response перехватчики**: восстановлена регистрация и обработка `pre_request_hook`, `post_request_hook`, `on_updates_hook` и `on_update_hook` для сетевых методов `messages.sendMessage`, `messages.sendMedia`, `messages.sendMultiMedia`, `messages.editMessage`, `messages.getHistory` и др.
+- **Двусторонняя трансляция сущностей**:
+  - При отправке: `TL_messageEntityCustomEmoji` конвертируется в `tg://emoji?id=...`, предотвращая вырезание кастомных эмодзи сервером Telegram.
+  - При получении и отображении: `tg://emoji?id=...` автоматически транслируется обратно в `TL_messageEntityCustomEmoji` через `PutMessageHook` / `PutMessagesHook` и `post_request_hook` для нативного анимированного рендеринга в чате exteraGram.
+
+---
+
 ## [v10.3.14] - 2026-08-30
 
 ### 🚀 Полное устранение лагов и фризов (120 FPS Fast-Path)
