@@ -24,14 +24,30 @@ jobs:
       - name: Validate plugin editions
         run: python build_plugins.py
 
+      - name: Extract Release Notes
+        run: |
+          python -c "
+          import re
+          tag = '${{ github.ref_name }}'
+          with open('CHANGELOG.md', 'r', encoding='utf-8') as f:
+              text = f.read()
+          # Match ## [v10.3.12] or ## [10.3.12]
+          pattern = r'##\s*\[(?:v)?' + re.escape(tag.lstrip('v')) + r'\].*?\n(.*?)(?=\n##\s*\[|\Z)'
+          match = re.search(pattern, text, re.DOTALL)
+          notes = match.group(1).strip() if match else ''
+          with open('RELEASE_NOTES.md', 'w', encoding='utf-8') as out:
+              out.write(notes if notes else 'Релиз ' + tag)
+          "
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          name: ${{ github.ref_name }}
+          name: SyncProfile ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
           files: |
             sync_ayugram.plugin
             sync_exteragram.plugin
             zwylib.plugin
-          generate_release_notes: true
+          generate_release_notes: false
           draft: false
           prerelease: false
