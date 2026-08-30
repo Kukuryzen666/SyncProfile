@@ -1,6 +1,6 @@
 # ⭐ SyncProfile — Синхронизация профилей для AyuGram и exteraGram
 
-[![Version](https://img.shields.io/badge/version-10.3.16-blue.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile/releases/latest)
+[![Version](https://img.shields.io/badge/version-10.3.17-blue.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile/releases/latest)
 [![Clients](https://img.shields.io/badge/Clients-AyuGram%20%7C%20exteraGram-8A2BE2.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile)
 [![Server](https://img.shields.io/badge/Server-sync.efn.mom-0088cc.svg?style=for-the-badge)](https://sync.efn.mom)
 
@@ -55,7 +55,7 @@
 ### Шаг 3: Настройте профиль
 1. Перейдите в *Настройки -> Плагины -> SyncProfile*.
 2. Выберите цвета и узоры (или нажмите **«✨ Считать из локального Premium»** для автоимпорта).
-3. Нажмите **«🚀 Опубликовать профиль»** (или **«🌐 Опубликовать ВСЕ мои аккаунты сразу»**).
+3. Нажмите **«🚀 Опубликовать профиль»** (или **«🚀 Опубликовать все аккаунты»**).
 
 ---
 

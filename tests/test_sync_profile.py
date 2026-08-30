@@ -879,9 +879,12 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             items = plugin.create_settings()
 
             texts = [item[1].get("text", "") for item in items if isinstance(item, tuple) and item[0] == "Text"]
-            # Verify clear cache is present in actions
-            self.assertTrue(any("Очистить локальный кэш" in t for t in texts))
-            # Verify full database download is removed
+            # Verify 3 meaningful actions: sync, push all, and clear/reset cache
+            self.assertTrue(any("Синхронизировать с сервером" in t for t in texts))
+            self.assertTrue(any("Опубликовать все аккаунты" in t for t in texts))
+            self.assertTrue(any("Сбросить кэш" in t for t in texts))
+            # Verify duplicate full download button is removed
+            self.assertFalse(any("Полная пересинхронизация базы" in t for t in texts))
             self.assertFalse(any("Полное скачивание базы" in t for t in texts))
 
     def test_clear_cache_action(self):
@@ -1463,8 +1466,17 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                 return [
                     FakeMethod("lockFiltersInternal"),
                     FakeMethod("checkFiltersLocked"),
+                    FakeMethod("lockFilters"),
+                    FakeMethod("isFilterLocked"),
+                    FakeMethod("isDialogFilterLocked"),
+                    FakeMethod("areFiltersLocked"),
                     FakeMethod("isPremiumUser", [object]),
+                    FakeMethod("isUserPremium", [object]),
+                    FakeMethod("hasPremium", [object]),
                     FakeMethod("getUser", [FakeMethod("long")]),
+                    FakeMethod("isPremium"),
+                    FakeMethod("hasPremiumOnAccounts"),
+                    FakeMethod("checkFilterLocked"),
                 ]
 
             module._get_class_methods = fake_get_class_methods
@@ -1473,24 +1485,50 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             plugin._register_xposed_hooks()
             self.assertTrue(len(plugin._xposed_unhooks) > 0)
 
-            # Find LockFiltersHook in registered hooks
-            lock_hook = None
-            is_prem_mc_hook = None
-            for m, h in registered_hooks:
-                if "LockFiltersHook" in h.__class__.__name__:
-                    lock_hook = h
-                elif "MessagesControllerIsPremiumHook" in h.__class__.__name__:
-                    is_prem_mc_hook = h
+            # Find LockFiltersHook, IsFilterLockedHook, and IsPremiumHook in registered hooks
+            lock_hooks = []
+            filter_locked_hooks = []
+            is_prem_mc_hooks = []
+            dialogs_act_hooks = []
 
-            self.assertIsNotNone(lock_hook)
+            for m, h in registered_hooks:
+                h_name = h.__class__.__name__
+                if "LockFiltersHook" in h_name:
+                    lock_hooks.append((m, h))
+                elif "IsFilterLockedHook" in h_name:
+                    filter_locked_hooks.append((m, h))
+                elif "MessagesControllerIsPremiumHook" in h_name:
+                    is_prem_mc_hooks.append((m, h))
+                elif "DialogsActivityCheckFilterLockedHook" in h_name:
+                    dialogs_act_hooks.append((m, h))
+
+            # Verify ALL 3 lock filter methods are hooked
+            self.assertEqual(len(lock_hooks), 3)
+            lock_method_names = {m.getName() for m, h in lock_hooks}
+            self.assertEqual(lock_method_names, {"lockFiltersInternal", "checkFiltersLocked", "lockFilters"})
+
+            # Test LockFiltersHook unlocks dialogFilters and cancels method
             p = Param(this_obj=mc_inst)
-            lock_hook.before_hooked_method(p)
+            lock_hooks[0][1].before_hooked_method(p)
             self.assertFalse(mc_inst.dialogFilters[0].locked)
             self.assertFalse(mc_inst.dialogFilters[1].locked)
             self.assertIsNone(p.result)
 
+            # Verify ALL 3 isFilterLocked methods are hooked and return False
+            self.assertEqual(len(filter_locked_hooks), 3)
+            p_fl = Param()
+            filter_locked_hooks[0][1].before_hooked_method(p_fl)
+            self.assertFalse(p_fl.result)
+
+            # Verify DialogsActivity hook cancels checkFilterLocked
+            self.assertTrue(len(dialogs_act_hooks) >= 1)
+            p_da = Param()
+            dialogs_act_hooks[0][1].before_hooked_method(p_da)
+            self.assertIsNone(p_da.result)
+
             # 2. Test MessagesControllerIsPremiumHook returns True for own account and SyncProfile user, but not for others
-            self.assertIsNotNone(is_prem_mc_hook)
+            self.assertTrue(len(is_prem_mc_hooks) >= 1)
+            is_prem_mc_hook = is_prem_mc_hooks[0][1]
             # Own account -> True
             p_prem = Param(args=[777000])
             is_prem_mc_hook.after_hooked_method(p_prem)

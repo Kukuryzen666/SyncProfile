@@ -91,7 +91,7 @@ __id__ = "sync_profile_exteragram"
 __name__ = "SyncProfile [exteraGram]"
 __description__ = "Синхронизация кастомного профиля и встроенный Local Premium (отправка и отображение кастомных эмодзи, повышенные лимиты, премиум стикеры/реакции) для клиентов exteraGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.16"
+__version__ = "10.3.17"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -1704,7 +1704,7 @@ class Plugin(BasePlugin):
         ClassCastException (Long cannot be cast to Integer) в NotificationCenter.
         Chaquopy выбирает перегрузку по типу аргумента: Python int → Long;
         некоторые версии Telegram ожидают long-примитив, другие — Integer.
-        Передача Long явно гарантирует совместимость с long-перегрузкой."""
+        Передача Long гарантирует совместимость с long-перегрузкой."""
         try:
             from java.lang import Long as _JLong
             return mc.getUser(_JLong(uid))
@@ -1717,9 +1717,8 @@ class Plugin(BasePlugin):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _register_xposed_hooks(self):
-        """Регистрирует минимальный набор канонических хуков только на MessagesController.
-        Исключены тяжелые хуки UI-потока (UserObject.hasPremium, hasAnimatedAvatar),
-        чтобы гарантировать 120 FPS без просадок и микрофризов."""
+        """Регистрирует канонические хуки на MessagesController, UserConfig, UserObject, DialogsActivity.
+        Гарантирует 120 FPS без просадок и предотвращает сброс выбранной вкладки папок при выходе из диалогов."""
         try:
             MessagesControllerClass = find_class("org.telegram.messenger.MessagesController")
             plugin_self = self
@@ -1838,6 +1837,13 @@ class Plugin(BasePlugin):
                         except Exception:
                             pass
 
+                class MessagesControllerIsFilterLockedHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            param.setResult(False)
+                        except Exception:
+                            pass
+
                 class MessagesControllerIsPremiumHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
@@ -1858,7 +1864,6 @@ class Plugin(BasePlugin):
 
                 methods = _get_class_methods(MessagesControllerClass)
 
-                # Hook ONLY ONE canonical overload to avoid cascade overhead on hot paths
                 user_hooked = False
                 chat_hooked = False
                 user_full_hooked = False
@@ -1867,8 +1872,6 @@ class Plugin(BasePlugin):
                 put_chat_hooked = False
                 put_message_hooked = False
                 put_messages_hooked = False
-                lock_filters_hooked = False
-                is_premium_hooked = False
 
                 for m in methods:
                     try:
@@ -1929,27 +1932,32 @@ class Plugin(BasePlugin):
                                     self._xposed_unhooks.append(unhook)
                                     put_message_hooked = True
                         elif not put_messages_hooked and m_name == "putMessages" and num_params >= 1:
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, PutMessagesHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
-                                put_messages_hooked = True
-                        elif not lock_filters_hooked and m_name in ("lockFiltersInternal", "checkFiltersLocked", "lockFilters"):
+                            p0_name = p_types[0].getName()
+                            if "Message" in p0_name:
+                                m.setAccessible(True)
+                                unhook = self.hook_method(m, PutMessagesHook())
+                                if unhook:
+                                    self._xposed_unhooks.append(unhook)
+                                    put_messages_hooked = True
+                        elif m_name in ("lockFiltersInternal", "checkFiltersLocked", "lockFilters"):
                             m.setAccessible(True)
                             unhook = self.hook_method(m, MessagesControllerLockFiltersHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                lock_filters_hooked = True
-                        elif not is_premium_hooked and m_name in ("isUserPremium", "isPremiumUser", "hasPremium"):
+                        elif m_name in ("isFilterLocked", "isDialogFilterLocked", "areFiltersLocked"):
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, MessagesControllerIsFilterLockedHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                        elif m_name in ("isUserPremium", "isPremiumUser", "hasPremium"):
                             m.setAccessible(True)
                             unhook = self.hook_method(m, MessagesControllerIsPremiumHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                is_premium_hooked = True
                     except Exception as e:
                         log(f"SyncProfile: hook MessagesController method {m} error: {e}")
 
-            # ── Hook UserConfig.isPremium: предотвращает сброс активной вкладки папок при выходе из чата ──
+            # ── Hook UserConfig.isPremium & hasPremiumOnAccounts ──
             UserConfigClass = find_class("org.telegram.messenger.UserConfig")
             if UserConfigClass:
                 class UserConfigIsPremiumHook(MethodHook):
@@ -1961,7 +1969,7 @@ class Plugin(BasePlugin):
 
                 for m in _get_class_methods(UserConfigClass):
                     try:
-                        if m.getName() == "isPremium" and len(m.getParameterTypes()) == 0:
+                        if m.getName() in ("isPremium", "hasPremiumOnAccounts"):
                             m.setAccessible(True)
                             un = self.hook_method(m, UserConfigIsPremiumHook())
                             if un:
@@ -1969,7 +1977,7 @@ class Plugin(BasePlugin):
                     except Exception:
                         pass
 
-            # ── Hook UserObject.isPremiumUser / hasPremium ──
+            # ── Hook UserObject.isPremiumUser / hasPremium / isPremium ──
             UserObjectClass = find_class("org.telegram.messenger.UserObject")
             if UserObjectClass:
                 class UserObjectIsPremiumHook(MethodHook):
@@ -1992,9 +2000,29 @@ class Plugin(BasePlugin):
 
                 for m in _get_class_methods(UserObjectClass):
                     try:
-                        if m.getName() in ("isPremiumUser", "hasPremium") and len(m.getParameterTypes()) == 1:
+                        if m.getName() in ("isPremiumUser", "hasPremium", "isPremium") and len(m.getParameterTypes()) == 1:
                             m.setAccessible(True)
                             un = self.hook_method(m, UserObjectIsPremiumHook())
+                            if un:
+                                self._xposed_unhooks.append(un)
+                    except Exception:
+                        pass
+
+            # ── Hook DialogsActivity: предотвращает сброс выбранной вкладки папки при выходе из чата ──
+            DialogsActivityClass = find_class("org.telegram.ui.DialogsActivity")
+            if DialogsActivityClass:
+                class DialogsActivityCheckFilterLockedHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            param.setResult(None)
+                        except Exception:
+                            pass
+
+                for m in _get_class_methods(DialogsActivityClass):
+                    try:
+                        if m.getName() in ("checkFilterLocked", "checkFiltersLocked"):
+                            m.setAccessible(True)
+                            un = self.hook_method(m, DialogsActivityCheckFilterLockedHook())
                             if un:
                                 self._xposed_unhooks.append(un)
                     except Exception:
@@ -3231,29 +3259,22 @@ class Plugin(BasePlugin):
         items.extend([
             Divider(text="Общие действия"),
             Text(
-                text="⚡ Быстрая дельта-синхронизация",
-                subtext="Запросить только новые и измененные профили с сервера (быстро и экономно)",
+                text="🔄 Синхронизировать с сервером",
+                subtext="Получить свежие обновления профилей и каналов с сервера",
                 icon="msg_sync",
                 accent=True,
                 on_click=lambda view: self.sync_delta_updates_from_server(show_bulletin=True),
             ),
             Text(
-                text="🔄 Полная пересинхронизация базы",
-                subtext="Заново загрузить всю базу профилей и чатов с сервера",
-                icon="msg_sync",
-                accent=True,
-                on_click=lambda view: self._sync_database_action(view),
-            ),
-            Text(
-                text="🌐 Опубликовать ВСЕ мои аккаунты сразу",
-                subtext="Отправить индивидуальные цвета всех аккаунтов на сервер в один клик",
+                text="🚀 Опубликовать все аккаунты",
+                subtext="Отправить настройки и цвета всех активных аккаунтов на сервер в один клик",
                 icon="msg_send",
                 accent=True,
                 on_click=lambda view: self.push_all_accounts(show_ui_bulletin=True),
             ),
             Text(
-                text="🧹 Очистить локальный кэш",
-                subtext="Сбросить локальные кэши и заново загрузить актуальную базу",
+                text="🧹 Сбросить кэш и перекачать базу",
+                subtext="Полная очистка локального кэша и принудительная загрузка всей базы с нуля",
                 icon="msg_delete",
                 red=True,
                 on_click=lambda view: self._clear_cache_action(view),
