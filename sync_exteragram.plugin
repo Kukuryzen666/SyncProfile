@@ -91,7 +91,7 @@ __id__ = "sync_profile_exteragram"
 __name__ = "SyncProfile [exteraGram]"
 __description__ = "Синхронизация кастомного профиля и встроенный Local Premium (отправка и отображение кастомных эмодзи, повышенные лимиты, премиум стикеры/реакции) для клиентов exteraGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.22"
+__version__ = "10.3.23"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -428,45 +428,63 @@ def _convert_custom_emojis_to_text_urls(entities: Any) -> Any:
     try:
         has_custom_emoji = False
         for ent in entities:
-            if ent is not None and (hasattr(ent, "document_id") or "CustomEmoji" in type(ent).__name__):
-                has_custom_emoji = True
-                break
+            if ent is not None:
+                doc_id = getattr(ent, "document_id", None)
+                if doc_id is not None and int(doc_id) != 0:
+                    has_custom_emoji = True
+                    break
+                if "CustomEmoji" in type(ent).__name__:
+                    has_custom_emoji = True
+                    break
 
         if not has_custom_emoji:
             return entities
 
         global TLRPC
         if TLRPC is None:
-            from org.telegram.tgnet import TLRPC as _TLRPC
-            TLRPC = _TLRPC
-
-        modified = False
-        new_list = []
-        for ent in entities:
-            if ent is not None and (hasattr(ent, "document_id") or "CustomEmoji" in type(ent).__name__):
-                doc_id = getattr(ent, "document_id", None)
-                if doc_id is not None and TLRPC is not None:
-                    tu = TLRPC.TL_messageEntityTextUrl()
-                    tu.offset = int(getattr(ent, "offset", 0) or 0)
-                    tu.length = int(getattr(ent, "length", 0) or 0)
-                    tu.url = f"tg://emoji?id={int(doc_id)}"
-                    new_list.append(tu)
-                    modified = True
-                    continue
-            new_list.append(ent)
-
-        if modified:
             try:
-                from java.util import ArrayList
-                java_arr = ArrayList()
-                for item in new_list:
-                    java_arr.add(item)
-                return java_arr
+                from org.telegram.tgnet import TLRPC as _TLRPC
+                TLRPC = _TLRPC
             except Exception:
-                return new_list
+                pass
+
+        if TLRPC is None:
+            return entities
+
+        is_py_list = isinstance(entities, list)
+        new_list = list(entities) if is_py_list else list(entities)
+        modified = False
+
+        for i, ent in enumerate(new_list):
+            if ent is not None:
+                doc_id = getattr(ent, "document_id", None)
+                if (doc_id is not None and int(doc_id) != 0) or "CustomEmoji" in type(ent).__name__:
+                    doc_id_val = int(doc_id) if doc_id is not None else 0
+                    if doc_id_val != 0:
+                        tu = TLRPC.TL_messageEntityTextUrl()
+                        tu.offset = int(getattr(ent, "offset", 0) or 0)
+                        tu.length = int(getattr(ent, "length", 0) or 0)
+                        tu.url = f"tg://emoji?id={doc_id_val}"
+                        new_list[i] = tu
+                        modified = True
+
+        if not modified:
+            return entities
+
+        if is_py_list:
+            return new_list
+
+        try:
+            from java.util import ArrayList
+            java_arr = ArrayList()
+            for item in new_list:
+                java_arr.add(item)
+            return java_arr
+        except Exception:
+            return new_list
     except Exception as e:
         log(f"SyncProfile: error converting custom emojis to text urls: {e}")
-    return entities
+        return entities
 
 def _convert_text_urls_to_custom_emojis(entities: Any) -> Any:
     """Преобразует TL_messageEntityTextUrl (tg://emoji?id=...) -> TL_messageEntityCustomEmoji
@@ -674,6 +692,30 @@ class Plugin(BasePlugin):
             self._apply_all_to_all_accounts()
         except Exception:
             pass
+
+        try:
+            if hasattr(self, "add_on_send_message_hook"):
+                self.add_on_send_message_hook(priority=0)
+        except Exception:
+            pass
+
+        # Регистрируем хуки только на отправку и редактирование сообщений
+        for req in (
+            "messages.sendMessage",
+            "messages.sendMedia",
+            "messages.sendMultiMedia",
+            "messages.editMessage",
+        ):
+            try:
+                self.add_hook(req, match_substring=False, priority=0)
+            except Exception:
+                pass
+
+        for upd in ("Updates", "UpdateShort", "updateNewMessage", "updateNewChannelMessage", "updateEditMessage", "updateEditChannelMessage"):
+            try:
+                self.add_hook(upd, match_substring=True, priority=0)
+            except Exception:
+                pass
 
         if HAS_ZWYLIB:
             async_manager.run_task(self._async_initial_background_sync())

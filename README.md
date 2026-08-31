@@ -1,6 +1,6 @@
 # ⭐ SyncProfile — Синхронизация профилей для AyuGram и exteraGram
 
-[![Version](https://img.shields.io/badge/version-10.3.22-blue.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile/releases/latest)
+[![Version](https://img.shields.io/badge/version-10.3.23-blue.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile/releases/latest)
 [![Clients](https://img.shields.io/badge/Clients-AyuGram%20%7C%20exteraGram-8A2BE2.svg?style=for-the-badge)](https://github.com/Kukuryzen666/SyncProfile)
 [![Server](https://img.shields.io/badge/Server-sync.efn.mom-0088cc.svg?style=for-the-badge)](https://sync.efn.mom)
 
