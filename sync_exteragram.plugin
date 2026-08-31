@@ -91,7 +91,7 @@ __id__ = "sync_profile_exteragram"
 __name__ = "SyncProfile [exteraGram]"
 __description__ = "Синхронизация кастомного профиля и встроенный Local Premium (отправка и отображение кастомных эмодзи, повышенные лимиты, премиум стикеры/реакции) для клиентов exteraGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.20"
+__version__ = "10.3.21"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -713,6 +713,18 @@ class Plugin(BasePlugin):
             return HookResult(strategy=HookStrategy.DEFAULT)
         try:
             _patch_messages_in_response(response)
+            users = getattr(response, "users", None)
+            if users:
+                for u in users:
+                    uid = getattr(u, "id", 0)
+                    if uid and (uid in self._profiles_snapshot or uid in self._own_uids_cache):
+                        self._patch_user_tl_object(u)
+            chats = getattr(response, "chats", None)
+            if chats:
+                for c in chats:
+                    cid = _normalize_chat_id(getattr(c, "id", 0))
+                    if cid and cid in self._chats_snapshot:
+                        self._patch_chat_tl_object(c)
         except Exception:
             pass
         return HookResult(strategy=HookStrategy.DEFAULT)
@@ -1661,30 +1673,6 @@ class Plugin(BasePlugin):
             MessagesControllerClass = find_class("org.telegram.messenger.MessagesController")
 
             if MessagesControllerClass:
-                class GetUserHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            args = getattr(param, "args", None)
-                            if not args or len(args) == 0 or args[0] is None:
-                                return
-                            try:
-                                uid = int(args[0])
-                            except Exception:
-                                return
-                            if uid <= 0:
-                                return
-                            if uid not in plugin_self._profiles_snapshot and uid not in plugin_self._own_uids_cache:
-                                return
-                            if uid in plugin_self._handled_uids:
-                                return
-
-                            user_obj = param.getResult()
-                            if user_obj is not None:
-                                if plugin_self._patch_user_tl_object(user_obj):
-                                    plugin_self._handled_uids.add(uid)
-                        except Exception as e:
-                            logger.debug(f"GetUserHook error: {e}")
-
                 class GetUserFullHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
@@ -1707,30 +1695,6 @@ class Plugin(BasePlugin):
                                     plugin_self._patch_full_user_tl_object(fu_obj, int(uid_obj))
                         except Exception as e:
                             logger.debug(f"GetUserFullHook error: {e}")
-
-                class GetChatHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            args = getattr(param, "args", None)
-                            if not args or len(args) == 0 or args[0] is None:
-                                return
-                            try:
-                                cid = _normalize_chat_id(args[0])
-                            except Exception:
-                                return
-                            if cid <= 0:
-                                return
-                            if cid not in plugin_self._chats_snapshot:
-                                return
-                            if cid in plugin_self._handled_cids:
-                                return
-
-                            chat_obj = param.getResult()
-                            if chat_obj is not None:
-                                if plugin_self._patch_chat_tl_object(chat_obj):
-                                    plugin_self._handled_cids.add(cid)
-                        except Exception as e:
-                            logger.debug(f"GetChatHook error: {e}")
 
                 class GetChatFullHook(MethodHook):
                     def after_hooked_method(self, param):
@@ -1756,9 +1720,7 @@ class Plugin(BasePlugin):
                             logger.debug(f"GetChatFullHook error: {e}")
 
                 methods = _get_class_methods(MessagesControllerClass)
-                MC_TARGET_NAMES = {"getUser", "getChat", "getUserFull", "getChatFull"}
-                user_hooked = False
-                chat_hooked = False
+                MC_TARGET_NAMES = {"getUserFull", "getChatFull"}
                 user_full_hooked = False
                 chat_full_hooked = False
 
@@ -1773,23 +1735,7 @@ class Plugin(BasePlugin):
                         if num_params != 1:
                             continue
 
-                        p0_name = getattr(p_types[0], "getName", lambda: str(p_types[0]))()
-
-                        if m_name == "getUser" and not user_hooked:
-                            if p0_name in ("long", "java.lang.Long"):
-                                m.setAccessible(True)
-                                unhook = self.hook_method(m, GetUserHook())
-                                if unhook:
-                                    self._xposed_unhooks.append(unhook)
-                                    user_hooked = True
-                        elif m_name == "getChat" and not chat_hooked:
-                            if p0_name in ("long", "java.lang.Long"):
-                                m.setAccessible(True)
-                                unhook = self.hook_method(m, GetChatHook())
-                                if unhook:
-                                    self._xposed_unhooks.append(unhook)
-                                    chat_hooked = True
-                        elif m_name == "getUserFull" and not user_full_hooked:
+                        if m_name == "getUserFull" and not user_full_hooked:
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetUserFullHook())
                             if unhook:
@@ -2235,17 +2181,36 @@ class Plugin(BasePlugin):
 
                 def ui_apply(patches=patches):
                     try:
-                        from org.telegram.messenger import UserConfig
+                        from org.telegram.messenger import UserConfig, MessagesController
                         for acc_idx, my_uid, nc, nbg, prc, pbg, em_id, prem in patches:
                             try:
                                 u_cfg = UserConfig.getInstance(acc_idx)
                                 if not u_cfg or not u_cfg.isClientActivated():
                                     continue
                                 curr_u = u_cfg.getCurrentUser()
-                                if not curr_u:
-                                    continue
+                                if curr_u:
+                                    plugin_self._patch_user_tl_object(curr_u)
 
-                                plugin_self._patch_user_tl_object(curr_u)
+                                mc = MessagesController.getInstance(acc_idx)
+                                if mc:
+                                    users_map = getattr(mc, "users", None)
+                                    if users_map:
+                                        for uid in plugin_self._profiles_snapshot:
+                                            try:
+                                                u_obj = users_map.get(int(uid))
+                                                if u_obj:
+                                                    plugin_self._patch_user_tl_object(u_obj)
+                                            except Exception:
+                                                pass
+                                    chats_map = getattr(mc, "chats", None)
+                                    if chats_map:
+                                        for cid in plugin_self._chats_snapshot:
+                                            try:
+                                                c_obj = chats_map.get(int(cid))
+                                                if c_obj:
+                                                    plugin_self._patch_chat_tl_object(c_obj)
+                                            except Exception:
+                                                pass
                             except Exception:
                                 pass
                     except Exception as e:

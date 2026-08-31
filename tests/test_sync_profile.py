@@ -1430,8 +1430,8 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                     FakeMethod("areFiltersLocked"),
                     FakeMethod("canUseCustomEmoji"),
                     FakeMethod("canUsePremiumSticker"),
-                    FakeMethod("getUser", [FakeMethod("long")]),
-                    FakeMethod("getChat", [FakeMethod("long")]),
+                    FakeMethod("getUserFull", [FakeMethod("long")]),
+                    FakeMethod("getChatFull", [FakeMethod("long")]),
                 ]
 
             module._get_class_methods = fake_get_class_methods
@@ -1446,9 +1446,9 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
 
             for m, h in registered_hooks:
                 h_name = h.__class__.__name__
-                if "GetUserHook" in h_name:
+                if "GetUserFullHook" in h_name:
                     user_hooks.append((m, h))
-                elif "GetChatHook" in h_name:
+                elif "GetChatFullHook" in h_name:
                     chat_hooks.append((m, h))
 
             self.assertTrue(len(user_hooks) >= 1)
@@ -1539,6 +1539,8 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                 return [
                     FakeMethod("getUser", [MockLongParam()]),
                     FakeMethod("getChat", [MockLongParam()]),
+                    FakeMethod("getUserFull", [MockLongParam()]),
+                    FakeMethod("getChatFull", [MockLongParam()]),
                     FakeMethod("putUser", [MockLongParam()]),
                     FakeMethod("putChat", [MockLongParam()]),
                 ]
@@ -1549,15 +1551,18 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             plugin._register_xposed_hooks()
 
             hook_classes = {h.__class__.__name__ for m, h in registered_hooks}
-            # Heavy put hooks must NOT be registered
+
+            # Heavy put/get hooks must NOT be registered on scroll hot paths
             self.assertNotIn("PutUserHook", hook_classes)
             self.assertNotIn("PutChatHook", hook_classes)
             self.assertNotIn("PutUsersHook", hook_classes)
             self.assertNotIn("PutChatsHook", hook_classes)
+            self.assertNotIn("GetUserHook", hook_classes)
+            self.assertNotIn("GetChatHook", hook_classes)
 
-            # Lazy JIT get hooks MUST be registered
-            self.assertIn("GetUserHook", hook_classes)
-            self.assertIn("GetChatHook", hook_classes)
+            # Full profile hooks are safely registered
+            self.assertIn("GetUserFullHook", hook_classes)
+            self.assertIn("GetChatFullHook", hook_classes)
 
     def test_dialog_filter_unlock_hooks_registered(self):
         """Тест: легковесные хуки разблокировки папок регистрируются без тяжелых циклов перебора."""
