@@ -1541,8 +1541,10 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                     FakeMethod("getChat", [MockLongParam()]),
                     FakeMethod("getUserFull", [MockLongParam()]),
                     FakeMethod("getChatFull", [MockLongParam()]),
-                    FakeMethod("putUser", [MockLongParam()]),
-                    FakeMethod("putChat", [MockLongParam()]),
+                    FakeMethod("putUser", [MockLongParam(), MockLongParam()]),
+                    FakeMethod("putChat", [MockLongParam(), MockLongParam()]),
+                    FakeMethod("putUsers", [MockLongParam(), MockLongParam()]),
+                    FakeMethod("putChats", [MockLongParam(), MockLongParam()]),
                 ]
 
             module._get_class_methods = fake_get_class_methods
@@ -1552,13 +1554,15 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
 
             hook_classes = {h.__class__.__name__ for m, h in registered_hooks}
 
-            # Heavy put/get hooks must NOT be registered on scroll hot paths
-            self.assertNotIn("PutUserHook", hook_classes)
-            self.assertNotIn("PutChatHook", hook_classes)
-            self.assertNotIn("PutUsersHook", hook_classes)
-            self.assertNotIn("PutChatsHook", hook_classes)
+            # Scroll hot path methods getUser/getChat must NEVER be hooked
             self.assertNotIn("GetUserHook", hook_classes)
             self.assertNotIn("GetChatHook", hook_classes)
+
+            # Data-load put hooks MUST be registered
+            self.assertIn("PutUserHook", hook_classes)
+            self.assertIn("PutChatHook", hook_classes)
+            self.assertIn("PutUsersHook", hook_classes)
+            self.assertIn("PutChatsHook", hook_classes)
 
             # Full profile hooks are safely registered
             self.assertIn("GetUserFullHook", hook_classes)

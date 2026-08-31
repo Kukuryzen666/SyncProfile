@@ -91,7 +91,7 @@ __id__ = "sync_profile_exteragram"
 __name__ = "SyncProfile [exteraGram]"
 __description__ = "Синхронизация кастомного профиля и встроенный Local Premium (отправка и отображение кастомных эмодзи, повышенные лимиты, премиум стикеры/реакции) для клиентов exteraGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.21"
+__version__ = "10.3.22"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -1673,6 +1673,60 @@ class Plugin(BasePlugin):
             MessagesControllerClass = find_class("org.telegram.messenger.MessagesController")
 
             if MessagesControllerClass:
+                class PutUserHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) > 0:
+                                u = args[0]
+                                if u is not None:
+                                    plugin_self._patch_user_tl_object(u)
+                        except Exception as e:
+                            logger.debug(f"PutUserHook error: {e}")
+
+                class PutChatHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) > 0:
+                                c = args[0]
+                                if c is not None:
+                                    plugin_self._patch_chat_tl_object(c)
+                        except Exception as e:
+                            logger.debug(f"PutChatHook error: {e}")
+
+                class PutUsersHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) > 0:
+                                users = args[0]
+                                if users is not None:
+                                    is_py_list = isinstance(users, list)
+                                    u_count = len(users) if is_py_list else (users.size() if hasattr(users, "size") else (len(users) if hasattr(users, "__len__") else 0))
+                                    for i in range(u_count):
+                                        u = users[i] if is_py_list else users.get(i)
+                                        if u is not None:
+                                            plugin_self._patch_user_tl_object(u)
+                        except Exception as e:
+                            logger.debug(f"PutUsersHook error: {e}")
+
+                class PutChatsHook(MethodHook):
+                    def before_hooked_method(self, param):
+                        try:
+                            args = getattr(param, "args", None)
+                            if args and len(args) > 0:
+                                chats = args[0]
+                                if chats is not None:
+                                    is_py_list = isinstance(chats, list)
+                                    c_count = len(chats) if is_py_list else (chats.size() if hasattr(chats, "size") else (len(chats) if hasattr(chats, "__len__") else 0))
+                                    for i in range(c_count):
+                                        c = chats[i] if is_py_list else chats.get(i)
+                                        if c is not None:
+                                            plugin_self._patch_chat_tl_object(c)
+                        except Exception as e:
+                            logger.debug(f"PutChatsHook error: {e}")
+
                 class GetUserFullHook(MethodHook):
                     def after_hooked_method(self, param):
                         try:
@@ -1720,7 +1774,11 @@ class Plugin(BasePlugin):
                             logger.debug(f"GetChatFullHook error: {e}")
 
                 methods = _get_class_methods(MessagesControllerClass)
-                MC_TARGET_NAMES = {"getUserFull", "getChatFull"}
+                MC_TARGET_NAMES = {"putUser", "putChat", "putUsers", "putChats", "getUserFull", "getChatFull"}
+                put_user_hooked = False
+                put_chat_hooked = False
+                put_users_hooked = False
+                put_chats_hooked = False
                 user_full_hooked = False
                 chat_full_hooked = False
 
@@ -1732,16 +1790,38 @@ class Plugin(BasePlugin):
 
                         p_types = m.getParameterTypes()
                         num_params = len(p_types)
-                        if num_params != 1:
-                            continue
 
-                        if m_name == "getUserFull" and not user_full_hooked:
+                        if m_name == "putUser" and num_params == 2 and not put_user_hooked:
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, PutUserHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                                put_user_hooked = True
+                        elif m_name == "putChat" and num_params == 2 and not put_chat_hooked:
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, PutChatHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                                put_chat_hooked = True
+                        elif m_name == "putUsers" and num_params == 2 and not put_users_hooked:
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, PutUsersHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                                put_users_hooked = True
+                        elif m_name == "putChats" and num_params == 2 and not put_chats_hooked:
+                            m.setAccessible(True)
+                            unhook = self.hook_method(m, PutChatsHook())
+                            if unhook:
+                                self._xposed_unhooks.append(unhook)
+                                put_chats_hooked = True
+                        elif m_name == "getUserFull" and num_params == 1 and not user_full_hooked:
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetUserFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
                                 user_full_hooked = True
-                        elif m_name == "getChatFull" and not chat_full_hooked:
+                        elif m_name == "getChatFull" and num_params == 1 and not chat_full_hooked:
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetChatFullHook())
                             if unhook:
