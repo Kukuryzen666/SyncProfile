@@ -916,7 +916,7 @@ class Plugin(BasePlugin):
 
     def _ensure_local_premium(self):
         """В AyuGram локальный премиум управляется нативно самим клиентом (AyuConfig).
-        Гарантирует активацию нативного AyuConfig.localPremium для отправки кастомных/премиум эмодзи."""
+        Плагин не вмешивается в AyuConfig, сохраняя пользовательские настройки клиента."""
         global _SHARED_VALID_ATTRS
         # Telegram SharedConfig (нативная поддержка анимации видеоаватаров при необходимости)
         try:
