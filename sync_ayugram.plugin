@@ -929,9 +929,31 @@ class Plugin(BasePlugin):
 
     def _ensure_local_premium(self):
         """В AyuGram локальный премиум управляется нативно самим клиентом (AyuConfig).
-        Плагин не вмешивается в AyuConfig, сохраняя пользовательские настройки клиента."""
+        Гарантирует активацию нативного AyuConfig.localPremium для отправки кастомных/премиум эмодзи."""
         global _SHARED_VALID_ATTRS
-        # Telegram SharedConfig (нативная поддержка анимации видеоаватаров при необходимости)
+        # 1. Активация нативного Local Premium в AyuGram (AyuConfig.localPremium)
+        try:
+            from com.radolyn.ayugram import AyuConfig
+            changed_ac = False
+            if hasattr(AyuConfig, "localPremium") and not getattr(AyuConfig, "localPremium", True):
+                setattr(AyuConfig, "localPremium", True)
+                changed_ac = True
+            if changed_ac and hasattr(AyuConfig, "saveConfig"):
+                AyuConfig.saveConfig()
+        except Exception:
+            try:
+                AyuConfigClass = _find_class_cached("com.radolyn.ayugram.AyuConfig")
+                if AyuConfigClass is not None:
+                    changed_ac = False
+                    if hasattr(AyuConfigClass, "localPremium") and not getattr(AyuConfigClass, "localPremium", True):
+                        setattr(AyuConfigClass, "localPremium", True)
+                        changed_ac = True
+                    if changed_ac and hasattr(AyuConfigClass, "saveConfig"):
+                        AyuConfigClass.saveConfig()
+            except Exception:
+                pass
+
+        # 2. Telegram SharedConfig (нативная поддержка анимации видеоаватаров при необходимости)
         try:
             from org.telegram.messenger import SharedConfig
             if _SHARED_VALID_ATTRS is None:

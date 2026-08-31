@@ -686,16 +686,16 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                 sys.modules["com.radolyn.ayugram"] = old_ayugram
 
     def test_ayugram_ensure_local_premium(self):
-        """Тест: в AyuGram плагин не вмешивается в AyuConfig, оставляя его настройки клиенту."""
+        """Тест: в AyuGram плагин гарантирует активацию нативного AyuConfig.localPremium для отправки эмодзи."""
         module = load_plugin_module("sync_ayugram.plugin")
         plugin = module.Plugin()
         
         MockAyuConfig.localPremium = False
         MockAyuConfig.saveConfig.reset_mock()
         plugin._ensure_local_premium()
-        # AyuConfig не должен быть принудительно изменен плагином
-        self.assertFalse(MockAyuConfig.localPremium)
-        MockAyuConfig.saveConfig.assert_not_called()
+        # AyuConfig.localPremium должен быть гарантированно включен
+        self.assertTrue(MockAyuConfig.localPremium)
+        MockAyuConfig.saveConfig.assert_called_once()
 
     def test_patch_user_flags_and_idempotency(self):
         module = load_plugin_module("sync_ayugram.plugin")
