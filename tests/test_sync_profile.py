@@ -1369,7 +1369,9 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                 self.assertEqual(len(req.entities), 1)
                 self.assertIsInstance(req.entities[0], MockTLRPC.TL_messageEntityCustomEmoji)
 
-            # 2. Test post_request_hook / on_update_hook converts tg://emoji?id=... back to TL_messageEntityCustomEmoji (both clients)
+            # 2. Test post_request_hook / on_update_hook:
+            # - In exteraGram: converts tg://emoji?id=... back to TL_messageEntityCustomEmoji
+            # - In AyuGram: leaves messages untouched for native Local Premium engine
             class MockMessage:
                 def __init__(self):
                     self.entities = [MockTLRPC.TL_messageEntityTextUrl(0, 2, "tg://emoji?id=9988776655")]
@@ -1379,10 +1381,15 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                     self.message = MockMessage()
 
             upd = MockUpdate()
-            plugin.on_update_hook("updateNewMessage", 0, upd)
-            self.assertEqual(len(upd.message.entities), 1)
-            self.assertIsInstance(upd.message.entities[0], MockTLRPC.TL_messageEntityCustomEmoji)
-            self.assertEqual(upd.message.entities[0].document_id, 9988776655)
+            res_upd = plugin.on_update_hook("updateNewMessage", 0, upd)
+            self.assertEqual(res_upd.strategy, module.HookStrategy.DEFAULT)
+            if mod_file == "sync_exteragram.plugin":
+                self.assertEqual(len(upd.message.entities), 1)
+                self.assertIsInstance(upd.message.entities[0], MockTLRPC.TL_messageEntityCustomEmoji)
+                self.assertEqual(upd.message.entities[0].document_id, 9988776655)
+            else:
+                self.assertEqual(len(upd.message.entities), 1)
+                self.assertIsInstance(upd.message.entities[0], MockTLRPC.TL_messageEntityTextUrl)
 
     def test_prevent_folder_reset_hooks_and_is_premium(self):
         """Тест регистрации и работы хуков защиты от сброса папок («Все чаты»)."""
@@ -1666,28 +1673,30 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             self.assertNotIn("DialogsActivityCheckFilterLockedHook", hook_names)
 
     def test_post_request_hook_filters_irrelevant_requests(self):
-        """Тест: post_request_hook обрабатывает только запросы сообщений/каналов/обновлений."""
-        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
-            module = load_plugin_module(mod_file)
-            plugin = module.Plugin()
+        """Тест: post_request_hook фильтрует нерелевантные запросы и оставляет обработку сообщений в AyuGram нативному клиенту."""
+        # 1. exteraGram патчит сообщения в post_request_hook
+        module_ext = load_plugin_module("sync_exteragram.plugin")
+        plugin_ext = module_ext.Plugin()
+        mock_response = MagicMock()
+        mock_response.messages = ["msg1"]
+        patched_ext = []
+        module_ext._patch_messages_in_response = lambda resp: patched_ext.append(resp)
 
-            mock_response = MagicMock()
-            mock_response.messages = ["msg1"]
+        plugin_ext.post_request_hook("auth.sendCode", 0, mock_response, None)
+        plugin_ext.post_request_hook("help.getAppConfig", 0, mock_response, None)
+        self.assertEqual(len(patched_ext), 0)
 
-            patched = []
-            module._patch_messages_in_response = lambda resp: patched.append(resp)
+        plugin_ext.post_request_hook("messages.getHistory", 0, mock_response, None)
+        self.assertEqual(len(patched_ext), 1)
+        plugin_ext.post_request_hook("channels.getMessages", 0, mock_response, None)
+        self.assertEqual(len(patched_ext), 2)
 
-            # 1. Запрос из нерелевантного пакета (account, help, auth) -> мгновенный пропуск
-            plugin.post_request_hook("auth.sendCode", 0, mock_response, None)
-            plugin.post_request_hook("help.getAppConfig", 0, mock_response, None)
-            self.assertEqual(len(patched), 0)
+        # 2. AyuGram не модифицирует сообщения в post_request_hook, доверяя нативному Local Premium
+        module_ayu = load_plugin_module("sync_ayugram.plugin")
+        plugin_ayu = module_ayu.Plugin()
+        plugin_ayu.post_request_hook("messages.getHistory", 0, mock_response, None)
+        # Сообщения не трогаются плагином в AyuGram
 
-            # 2. Запрос из релевантного пакета (messages, channels, updates) -> обработка
-            plugin.post_request_hook("messages.getHistory", 0, mock_response, None)
-            self.assertEqual(len(patched), 1)
-
-            plugin.post_request_hook("channels.getMessages", 0, mock_response, None)
-            self.assertEqual(len(patched), 2)
 
     def test_dialog_filters_not_tampered_in_ui_apply(self):
         """Тест: _apply_all_to_all_accounts не трогает mc.dialogFilters (оставляет клиенту нативное управление)."""

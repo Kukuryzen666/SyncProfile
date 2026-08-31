@@ -744,11 +744,9 @@ class Plugin(BasePlugin):
         # Плагин НЕ перехватывает исходящие сообщения (sendMessage, sendMedia и т.д.),
         # чтобы не ломать посты в каналах и не конфликтовать с нативной отправкой AyuGram.
 
-        for upd in ("Updates", "UpdateShort", "updateNewMessage", "updateNewChannelMessage", "updateEditMessage", "updateEditChannelMessage"):
-            try:
-                self.add_hook(upd, match_substring=True, priority=0)
-            except Exception:
-                pass
+        # В AyuGram отправка и отображение кастомных эмодзи поддерживаются нативно клиентом (AyuConfig / Local Premium).
+        # Плагин НЕ перехватывает сообщения и не модифицирует сущности сообщений,
+        # полностью доверяя нативному движку AyuGram.
 
         if HAS_ZWYLIB:
             async_manager.run_task(self._async_initial_background_sync())
@@ -768,9 +766,8 @@ class Plugin(BasePlugin):
         return HookResult(strategy=HookStrategy.DEFAULT)
 
     def post_request_hook(self, request_name: str, account: int, response: Any, error: Any) -> HookResult:
-        """Перехват входящих ответов MTProto с сообщениями, пользователями и чатами:
-        1. Преобразует tg://emoji?id=... обратно в TL_messageEntityCustomEmoji для анимированного UI.
-        2. Проактивно патчит объекты пользователей и чатов из ответа сервера."""
+        """Перехват входящих ответов MTProto с пользователями и чатами:
+        проактивно патчит объекты пользователей и чатов из ответа сервера."""
         if error or not response or not request_name:
             return HookResult(strategy=HookStrategy.DEFAULT)
         if not (
@@ -784,7 +781,6 @@ class Plugin(BasePlugin):
         ):
             return HookResult(strategy=HookStrategy.DEFAULT)
         try:
-            _patch_messages_in_response(response)
             users = getattr(response, "users", None)
             if users:
                 try:
@@ -839,7 +835,6 @@ class Plugin(BasePlugin):
         if not updates:
             return HookResult(strategy=HookStrategy.DEFAULT)
         try:
-            _patch_messages_in_response(updates)
             users = getattr(updates, "users", None)
             if users:
                 try:
@@ -879,14 +874,6 @@ class Plugin(BasePlugin):
 
     def on_update_hook(self, update_name: str, account: int, update: Any) -> HookResult:
         """Перехват одиночных Update."""
-        if not update:
-            return HookResult(strategy=HookStrategy.DEFAULT)
-        try:
-            msg = getattr(update, "message", None)
-            if msg:
-                _patch_message_entities(msg)
-        except Exception:
-            pass
         return HookResult(strategy=HookStrategy.DEFAULT)
 
     def on_app_event(self, event_type: AppEvent):
