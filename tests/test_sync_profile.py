@@ -686,16 +686,16 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                 sys.modules["com.radolyn.ayugram"] = old_ayugram
 
     def test_ayugram_ensure_local_premium(self):
-        """Тест: в AyuGram плагин гарантирует активацию нативного AyuConfig.localPremium для отправки эмодзи."""
+        """Тест: в AyuGram плагин не вмешивается в AyuConfig, оставляя управление клиенту."""
         module = load_plugin_module("sync_ayugram.plugin")
         plugin = module.Plugin()
         
         MockAyuConfig.localPremium = False
         MockAyuConfig.saveConfig.reset_mock()
         plugin._ensure_local_premium()
-        # AyuConfig.localPremium должен быть гарантированно включен
-        self.assertTrue(MockAyuConfig.localPremium)
-        MockAyuConfig.saveConfig.assert_called_once()
+        # AyuConfig не должен модифицироваться плагином
+        self.assertFalse(MockAyuConfig.localPremium)
+        MockAyuConfig.saveConfig.assert_not_called()
 
     def test_patch_user_flags_and_idempotency(self):
         module = load_plugin_module("sync_ayugram.plugin")
@@ -1538,10 +1538,10 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             module = load_plugin_module(mod_file)
             plugin = module.Plugin()
 
-            plugin._profiles_cache[12345] = {"user_id": 12345, "name_color": 2, "profile_color": 3}
+            plugin._profiles_cache[999888] = {"user_id": 999888, "name_color": 2, "profile_color": 3}
             plugin._update_snapshot()
 
-            user_tracked = MockUser(12345)
+            user_tracked = MockUser(999888)
             user_untracked = MockUser(67890)
 
             # 1. Первый вызов для отслеживаемого юзера -> True и патчинг

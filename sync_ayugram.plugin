@@ -315,6 +315,18 @@ def _is_ayugram() -> bool:
     except Exception:
         return False
 
+def _get_current_active_user_id() -> int:
+    """Возвращает UID текущего активного пользователя в UI клиента AyuGram."""
+    try:
+        from org.telegram.messenger import UserConfig
+        sel = getattr(UserConfig, "selectedAccount", 0)
+        u_cfg = UserConfig.getInstance(sel)
+        if u_cfg and u_cfg.isClientActivated():
+            return int(u_cfg.getClientUserId() or 0)
+    except Exception:
+        pass
+    return 0
+
 # Кэш TL_peerColor объектов: (color_id, bg_emoji_id) → TL_peerColor.
 # Избегает создание новых Java-объектов на каждый getUser() вызов при прокрутке.
 # TG читает значения int-полей и не модифицирует их — обмен безопасен.
@@ -916,31 +928,9 @@ class Plugin(BasePlugin):
 
     def _ensure_local_premium(self):
         """В AyuGram локальный премиум управляется нативно самим клиентом (AyuConfig).
-        Гарантирует активацию нативного AyuConfig.localPremium для отправки кастомных/премиум эмодзи."""
+        Плагин не вмешивается в AyuConfig, сохраняя пользовательские настройки клиента."""
         global _SHARED_VALID_ATTRS
-        # 1. Активация нативного Local Premium в AyuGram (AyuConfig.localPremium)
-        try:
-            from com.radolyn.ayugram import AyuConfig
-            changed_ac = False
-            if hasattr(AyuConfig, "localPremium") and not getattr(AyuConfig, "localPremium", True):
-                setattr(AyuConfig, "localPremium", True)
-                changed_ac = True
-            if changed_ac and hasattr(AyuConfig, "saveConfig"):
-                AyuConfig.saveConfig()
-        except Exception:
-            try:
-                AyuConfigClass = _find_class_cached("com.radolyn.ayugram.AyuConfig")
-                if AyuConfigClass is not None:
-                    changed_ac = False
-                    if hasattr(AyuConfigClass, "localPremium") and not getattr(AyuConfigClass, "localPremium", True):
-                        setattr(AyuConfigClass, "localPremium", True)
-                        changed_ac = True
-                    if changed_ac and hasattr(AyuConfigClass, "saveConfig"):
-                        AyuConfigClass.saveConfig()
-            except Exception:
-                pass
-
-        # 2. Telegram SharedConfig (нативная поддержка анимации видеоаватаров при необходимости)
+        # Telegram SharedConfig (нативная поддержка анимации видеоаватаров при необходимости)
         try:
             from org.telegram.messenger import SharedConfig
             if _SHARED_VALID_ATTRS is None:
@@ -1268,6 +1258,17 @@ class Plugin(BasePlugin):
                 pass
             return False
 
+        # В AyuGram собственный активный аккаунт управляется нативно клиентом (AyuConfig / Local Premium).
+        # Плагин НЕ модифицирует flags/flags2/premium активного аккаунта,
+        # чтобы нативная отправка премиум-эмодзи и Local Premium работали без малейших сбоев.
+        curr_active_uid = _get_current_active_user_id()
+        if curr_active_uid > 0 and uid == curr_active_uid:
+            try:
+                u._sp_v = (cur_ver, 0)
+            except Exception:
+                pass
+            return False
+
         # 3. O(1) поиск в lock-free снимке CPython dict
         snap = getattr(self, "_profiles_snapshot", None)
         profile = snap.get(uid) if snap else None
@@ -1397,6 +1398,15 @@ class Plugin(BasePlugin):
         sp_v = getattr(fu, "_sp_v", None)
         if sp_v is not None and isinstance(sp_v, tuple) and len(sp_v) == 2 and sp_v[0] == cur_ver:
             return bool(sp_v[1])
+
+        # В AyuGram собственный активный аккаунт управляется нативно клиентом
+        curr_active_uid = _get_current_active_user_id()
+        if curr_active_uid > 0 and uid == curr_active_uid:
+            try:
+                fu._sp_v = (cur_ver, 0)
+            except Exception:
+                pass
+            return False
 
         snap = getattr(self, "_profiles_snapshot", None)
         profile = snap.get(uid) if snap else None
