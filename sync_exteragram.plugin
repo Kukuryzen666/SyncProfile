@@ -65,7 +65,7 @@ except Exception:
         def warning(self, *args):
             android_log(f"SyncProfile [WARN]: {' '.join(str(a) for a in args)}")
         def debug(self, *args):
-            pass
+            android_log(f"SyncProfile [DEBUG]: {' '.join(str(a) for a in args)}")
     logger = _FallbackLog()
 
     class _FallbackBulletins:
@@ -203,6 +203,25 @@ def _safe_int(val: Any, default: int = 0) -> int:
 # При прокрутке RecyclerView каждый getUser() проходит через хук → экономим ms/frame.
 _USER_CLASS_CACHE: Dict[str, bool] = {}
 _CHAT_CLASS_CACHE: Dict[str, bool] = {}
+_FIND_CLASS_CACHE: Dict[str, Any] = {}
+_AYU_VALID_ATTRS: Optional[List[str]] = None
+_EXTERA_VALID_ATTRS: Optional[List[str]] = None
+_EXTERA_CONFIG_CLASS: Optional[Any] = None
+_KOTO_VALID_ATTRS: Optional[List[str]] = None
+_SHARED_VALID_ATTRS: Optional[List[str]] = None
+
+def _find_class_cached(class_name: str) -> Any:
+    if class_name in _FIND_CLASS_CACHE:
+        return _FIND_CLASS_CACHE[class_name]
+    try:
+        cls = find_class(class_name)
+        if len(_FIND_CLASS_CACHE) < 200:
+            _FIND_CLASS_CACHE[class_name] = cls
+        return cls
+    except Exception:
+        if len(_FIND_CLASS_CACHE) < 200:
+            _FIND_CLASS_CACHE[class_name] = None
+        return None
 
 def _is_user(obj: Any) -> bool:
     if obj is None:
@@ -211,13 +230,13 @@ def _is_user(obj: Any) -> bool:
     cached = _USER_CLASS_CACHE.get(cls_key)
     if cached is not None:
         return cached
-    result = (
-        "User" in cls_key
-        or hasattr(obj, "first_name")
-        or hasattr(obj, "phone")
-        or hasattr(obj, "last_name")
-    )
-    _USER_CLASS_CACHE[cls_key] = result
+    lowered = cls_key.lower()
+    if "user" in lowered:
+        result = True
+    else:
+        result = bool(hasattr(obj, "first_name") or hasattr(obj, "phone") or hasattr(obj, "last_name"))
+    if len(_USER_CLASS_CACHE) < 100:
+        _USER_CLASS_CACHE[cls_key] = result
     return result
 
 def _is_chat(obj: Any) -> bool:
@@ -227,15 +246,13 @@ def _is_chat(obj: Any) -> bool:
     cached = _CHAT_CLASS_CACHE.get(cls_key)
     if cached is not None:
         return cached
-    result = (
-        "Chat" in cls_key
-        or "Channel" in cls_key
-        or hasattr(obj, "title")
-        or hasattr(obj, "broadcast")
-        or hasattr(obj, "megagroup")
-        or hasattr(obj, "participants_count")
-    )
-    _CHAT_CLASS_CACHE[cls_key] = result
+    lowered = cls_key.lower()
+    if "chat" in lowered or "channel" in lowered:
+        result = True
+    else:
+        result = bool(hasattr(obj, "title") or hasattr(obj, "broadcast") or hasattr(obj, "megagroup"))
+    if len(_CHAT_CLASS_CACHE) < 100:
+        _CHAT_CLASS_CACHE[cls_key] = result
     return result
 
 def _normalize_chat_id(cid: Any) -> int:
@@ -258,7 +275,7 @@ def _get_class_methods(cls_obj: Any) -> List[Any]:
     if cls_obj is None:
         return []
     target = cls_obj
-    if hasattr(target, "getClass"):
+    if not hasattr(target, "getDeclaredMethods") and hasattr(target, "getClass"):
         try:
             target = target.getClass()
         except Exception:
@@ -268,7 +285,8 @@ def _get_class_methods(cls_obj: Any) -> List[Any]:
     if hasattr(target, "getDeclaredMethods"):
         try:
             for m in target.getDeclaredMethods():
-                m_key = (getattr(m, "getName", lambda: "")(), len(getattr(m, "getParameterTypes", lambda: [])()))
+                p_types = getattr(m, "getParameterTypes", lambda: [])()
+                m_key = (getattr(m, "getName", lambda: "")(), tuple(getattr(p, "getName", lambda: "")() for p in p_types))
                 if m_key not in seen:
                     seen.add(m_key)
                     methods.append(m)
@@ -277,7 +295,8 @@ def _get_class_methods(cls_obj: Any) -> List[Any]:
     if hasattr(target, "getMethods"):
         try:
             for m in target.getMethods():
-                m_key = (getattr(m, "getName", lambda: "")(), len(getattr(m, "getParameterTypes", lambda: [])()))
+                p_types = getattr(m, "getParameterTypes", lambda: [])()
+                m_key = (getattr(m, "getName", lambda: "")(), tuple(getattr(p, "getName", lambda: "")() for p in p_types))
                 if m_key not in seen:
                     seen.add(m_key)
                     methods.append(m)
@@ -286,16 +305,7 @@ def _get_class_methods(cls_obj: Any) -> List[Any]:
     return methods
 
 def _is_ayugram() -> bool:
-    try:
-        from com.radolyn.ayugram import AyuConfig
-        return True
-    except Exception:
-        pass
-    try:
-        c = find_class("com.radolyn.ayugram.AyuConfig")
-        return c is not None
-    except Exception:
-        return False
+    return False
 
 # Кэш TL_peerColor объектов: (color_id, bg_emoji_id) → TL_peerColor.
 # Избегает создание новых Java-объектов на каждый getUser() вызов при прокрутке.
@@ -304,16 +314,14 @@ _peer_color_cache: Dict[Any, Any] = {}
 # Кэш TL_emojiStatus объектов: document_id → TL_emojiStatus.
 _emoji_status_cache: Dict[int, Any] = {}
 _STATIC_PEER_COLORS: Dict[int, Any] = {}
-_EMOJI_DOC_ID_CACHE: Dict[str, Optional[int]] = {}
-_PATCHED_MSG_IDS: Set[int] = set()
 
 def _build_peer_color(color_id: Any, bg_emoji_id: Any):
-    if color_id is None:
-        return None
-    c = _safe_int(color_id, -1)
-    if c < 0:
-        return None
     bg = _safe_int(bg_emoji_id, 0)
+    c = _safe_int(color_id, -1) if color_id is not None else -1
+    if c < 0 and bg == 0:
+        return None
+    if c < 0:
+        c = 0
     if bg == 0 and c in _STATIC_PEER_COLORS:
         return _STATIC_PEER_COLORS[c]
 
@@ -363,6 +371,9 @@ def _build_emoji_status(em_id: int):
         pass
     return None
 
+_EMOJI_DOC_ID_CACHE: Dict[str, Optional[int]] = {}
+_PATCHED_MSGS: Set[Tuple[int, int]] = set()
+
 def _extract_emoji_doc_id_from_url(url: str) -> Optional[int]:
     """Быстрое извлечение ID документа из ссылки без urllib.parse с O(1) in-memory кэшем."""
     if not url or ("emoji" not in url):
@@ -400,8 +411,9 @@ def _extract_emoji_doc_id_from_url(url: str) -> Optional[int]:
             val = url[idx + 3 : end_idx] if end_idx != -1 else url[idx + 3 :]
             if val.isdigit():
                 res = int(val)
-        if len(_EMOJI_DOC_ID_CACHE) < 1000:
-            _EMOJI_DOC_ID_CACHE[url] = res if res is not None else 0
+        if len(_EMOJI_DOC_ID_CACHE) > 1000:
+            _EMOJI_DOC_ID_CACHE.clear()
+        _EMOJI_DOC_ID_CACHE[url] = res if res is not None else 0
         return res
     except Exception:
         pass
@@ -414,15 +426,16 @@ def _convert_custom_emojis_to_text_urls(entities: Any) -> Any:
         return entities
 
     try:
-        is_java_list = hasattr(entities, "size") and hasattr(entities, "get")
-        count = entities.size() if is_java_list else len(entities)
+        is_py_list = isinstance(entities, list)
+        is_java_list = (not is_py_list) and hasattr(entities, "size") and hasattr(entities, "get")
+        count = len(entities) if is_py_list else (entities.size() if is_java_list else len(entities))
         if count == 0:
             return entities
 
         # ── Fast-path pre-check: есть ли кастомные эмодзи ──
         has_custom_emoji = False
         for i in range(count):
-            ent = entities.get(i) if is_java_list else entities[i]
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
             if ent is not None:
                 ent_cls = type(ent).__name__
                 if "CustomEmoji" in ent_cls or hasattr(ent, "document_id"):
@@ -440,7 +453,7 @@ def _convert_custom_emojis_to_text_urls(entities: Any) -> Any:
         modified = False
         new_list = []
         for i in range(count):
-            ent = entities.get(i) if is_java_list else entities[i]
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
             if ent is not None:
                 ent_cls = type(ent).__name__
                 if "CustomEmoji" in ent_cls or hasattr(ent, "document_id"):
@@ -484,15 +497,16 @@ def _convert_text_urls_to_custom_emojis(entities: Any) -> Any:
         return entities
 
     try:
-        is_java_list = hasattr(entities, "size") and hasattr(entities, "get")
-        count = entities.size() if is_java_list else len(entities)
+        is_py_list = isinstance(entities, list)
+        is_java_list = (not is_py_list) and hasattr(entities, "size") and hasattr(entities, "get")
+        count = len(entities) if is_py_list else (entities.size() if is_java_list else len(entities))
         if count == 0:
             return entities
 
         # ── Fast-path pre-check: проверяем, есть ли вообще emoji-ссылки среди сущностей ──
         has_emoji_url = False
         for i in range(count):
-            ent = entities.get(i) if is_java_list else entities[i]
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
             if ent is not None and "TextUrl" in type(ent).__name__:
                 url = getattr(ent, "url", None)
                 if url and "emoji" in str(url):
@@ -510,7 +524,7 @@ def _convert_text_urls_to_custom_emojis(entities: Any) -> Any:
         modified = False
         new_list = []
         for i in range(count):
-            ent = entities.get(i) if is_java_list else entities[i]
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
             if ent is not None and "TextUrl" in type(ent).__name__:
                 url = getattr(ent, "url", None)
                 if url and "emoji" in str(url):
@@ -554,7 +568,9 @@ def _patch_message_entities(msg: Any):
         if getattr(msg, "_sp_p", False):
             return
         msg_id = int(getattr(msg, "id", 0) or 0)
-        if msg_id != 0 and msg_id in _PATCHED_MSG_IDS:
+        dialog_id = int(getattr(msg, "dialog_id", 0) or 0)
+        msg_key = (dialog_id, msg_id)
+        if msg_id != 0 and msg_key in _PATCHED_MSGS:
             return
         try:
             msg._sp_p = True
@@ -566,9 +582,9 @@ def _patch_message_entities(msg: Any):
             if new_ents is not ents:
                 msg.entities = new_ents
         if msg_id != 0:
-            if len(_PATCHED_MSG_IDS) > 5000:
-                _PATCHED_MSG_IDS.clear()
-            _PATCHED_MSG_IDS.add(msg_id)
+            if len(_PATCHED_MSGS) > 5000:
+                _PATCHED_MSGS.clear()
+            _PATCHED_MSGS.add(msg_key)
     except Exception:
         pass
 
@@ -579,10 +595,11 @@ def _patch_messages_in_response(obj: Any):
     try:
         msgs = getattr(obj, "messages", None)
         if msgs:
-            is_java = hasattr(msgs, "size") and hasattr(msgs, "get")
-            count = msgs.size() if is_java else len(msgs)
+            is_py = isinstance(msgs, list)
+            is_java = (not is_py) and hasattr(msgs, "size") and hasattr(msgs, "get")
+            count = len(msgs) if is_py else (msgs.size() if is_java else len(msgs))
             for i in range(count):
-                m = msgs.get(i) if is_java else msgs[i]
+                m = msgs[i] if is_py else (msgs.get(i) if is_java else msgs[i])
                 if m:
                     _patch_message_entities(m)
         msg = getattr(obj, "message", None)
@@ -590,10 +607,11 @@ def _patch_messages_in_response(obj: Any):
             _patch_message_entities(msg)
         upds = getattr(obj, "updates", None)
         if upds:
-            is_java = hasattr(upds, "size") and hasattr(upds, "get")
-            count = upds.size() if is_java else len(upds)
+            is_py_u = isinstance(upds, list)
+            is_java_u = (not is_py_u) and hasattr(upds, "size") and hasattr(upds, "get")
+            count = len(upds) if is_py_u else (upds.size() if is_java_u else len(upds))
             for i in range(count):
-                u = upds.get(i) if is_java else upds[i]
+                u = upds[i] if is_py_u else (upds.get(i) if is_java_u else upds[i])
                 if u:
                     u_msg = getattr(u, "message", None)
                     if u_msg:
@@ -610,6 +628,7 @@ class Plugin(BasePlugin):
         self._profiles_cache: Dict[int, Dict[str, Any]] = {}
         self._chats_cache: Dict[int, Dict[str, Any]] = {}
         self._sync_lock = threading.Lock()
+        self._sync_op_lock = threading.Lock()
         # Lock-free snapshot for hot-path reads from UI/getter threads
         self._profiles_snapshot: Dict[int, Dict[str, Any]] = {}
         self._chats_snapshot: Dict[int, Dict[str, Any]] = {}
@@ -621,8 +640,6 @@ class Plugin(BasePlugin):
         self._last_selected_message: Optional[Any] = None
 
         # ── Fast-Path O(1) integer set caches (0 накладных расходов при скролле) ──
-        self._patched_users: Dict[int, int] = {}
-        self._patched_chats: Dict[int, int] = {}
         self._untracked_uids: Set[int] = set()
         self._untracked_cids: Set[int] = set()
 
@@ -642,6 +659,8 @@ class Plugin(BasePlugin):
         self._own_uids_cache: set = set()
         self._extera_local_premium_enabled: bool = True
         self._sync_in_progress: bool = False
+        self._cached_active_accs: Optional[List[Dict[str, Any]]] = None
+        self._cached_active_accs_time: float = 0.0
 
         if HAS_ZWYLIB:
             try:
@@ -676,6 +695,7 @@ class Plugin(BasePlugin):
         self._auto_import_from_official_tg_premium()
         self._ensure_local_premium()
         self._sync_local_ayuconfig()
+        self._show_badge_in_about = self.get_setting("show_syncprofile_badge_in_about", True)
 
         # Seed local profile cache with own active accounts
         active_accs = self._get_active_accounts_data()
@@ -698,15 +718,12 @@ class Plugin(BasePlugin):
         except Exception:
             pass
 
-        # Регистрируем хуки на отправку и получение сообщений для кастомных эмодзи
+        # Регистрируем хуки только на отправку и редактирование сообщений
         for req in (
             "messages.sendMessage",
             "messages.sendMedia",
             "messages.sendMultiMedia",
             "messages.editMessage",
-            "messages.getHistory",
-            "messages.getMessages",
-            "messages.getDiscussionMessage",
         ):
             try:
                 self.add_hook(req, match_substring=False, priority=0)
@@ -815,9 +832,11 @@ class Plugin(BasePlugin):
     def on_app_event(self, event_type: AppEvent):
         """Обработка событий жизненного цикла приложения (START, RESUME, PAUSE, STOP)."""
         if event_type in (AppEvent.START, AppEvent.RESUME):
-            self._ensure_local_premium()
-            self._sync_local_ayuconfig()
-            run_on_ui_thread(self._apply_all_to_all_accounts)
+            def _bg_resume_task():
+                self._ensure_local_premium()
+                self._apply_all_to_all_accounts()
+
+            threading.Thread(target=_bg_resume_task, daemon=True).start()
 
             # Проверяем необходимость фонового обновления при возврате в приложение
             if self.get_setting("enable_sync", True):
@@ -848,53 +867,37 @@ class Plugin(BasePlugin):
         logger.info(f"SyncProfile v{__version__}: Выгружен.")
 
     def _ensure_local_premium(self):
-        """Silently enables localPremium and animated video avatars in AyuGram, exteraGram, KotoGram, and SharedConfig."""
-        # 1. AyuGram
+        """В exteraGram локальный премиум обеспечивается плагином (ExteraConfig).
+        Активирует поддержку отправки и выбора кастомных эмодзи в клиенте."""
+        global _EXTERA_VALID_ATTRS, _SHARED_VALID_ATTRS, _EXTERA_CONFIG_CLASS
+        # 1. exteraGram
         try:
-            from com.radolyn.ayugram import AyuConfig
-            changed = False
-            for attr in (
-                "localPremium", "sendPremiumEmoji", "sendCustomEmoji",
-                "animateAvatars", "autoplayVideo", "loopAvatars",
-                "profileVideos", "profileVideoAutoplay", "streamAvatars",
-                "canAnimateAvatars", "useAyuStatus"
-            ):
-                if hasattr(AyuConfig, attr) and not getattr(AyuConfig, attr):
-                    setattr(AyuConfig, attr, True)
-                    changed = True
-            if changed:
-                if hasattr(AyuConfig, "saveConfig"):
-                    AyuConfig.saveConfig()
-                elif hasattr(AyuConfig, "save"):
-                    AyuConfig.save()
-        except Exception:
-            pass
-
-        # 2. exteraGram
-        try:
-            ExteraConfig = None
-            try:
-                from com.exteragram.messenger import ExteraConfig as _EC
-                ExteraConfig = _EC
-            except Exception:
-                pass
+            ExteraConfig = _EXTERA_CONFIG_CLASS
             if ExteraConfig is None:
                 try:
-                    from org.telegram.messenger import ExteraConfig as _EC2
-                    ExteraConfig = _EC2
+                    from com.exteragram.messenger import ExteraConfig as _EC
+                    ExteraConfig = _EC
                 except Exception:
-                    pass
-            if ExteraConfig is None:
-                ExteraConfig = find_class("com.exteragram.messenger.ExteraConfig") or find_class("org.telegram.messenger.ExteraConfig")
+                    try:
+                        from org.telegram.messenger import ExteraConfig as _EC2
+                        ExteraConfig = _EC2
+                    except Exception:
+                        ExteraConfig = _find_class_cached("com.exteragram.messenger.ExteraConfig") or _find_class_cached("org.telegram.messenger.ExteraConfig")
+                _EXTERA_CONFIG_CLASS = ExteraConfig
+
             if ExteraConfig is not None:
+                if _EXTERA_VALID_ATTRS is None:
+                    candidate_attrs = (
+                        "localPremium", "sendPremiumEmoji", "sendCustomEmoji",
+                        "sendPremiumEmojis", "sendCustomEmojis", "premiumEmojis", "customEmojis",
+                        "allowCustomEmojis", "allowPremiumEmojis", "allowSendPremiumEmoji", "allowSendCustomEmoji",
+                        "ignorePremiumEmojiAlert", "animateAvatars", "autoplayVideo", "loopAvatars"
+                    )
+                    _EXTERA_VALID_ATTRS = [a for a in candidate_attrs if hasattr(ExteraConfig, a)]
+
                 changed = False
-                for attr in (
-                    "localPremium", "sendPremiumEmoji", "sendCustomEmoji",
-                    "sendPremiumEmojis", "sendCustomEmojis", "premiumEmojis", "customEmojis",
-                    "allowCustomEmojis", "allowPremiumEmojis", "allowSendPremiumEmoji", "allowSendCustomEmoji",
-                    "ignorePremiumEmojiAlert", "animateAvatars", "autoplayVideo", "loopAvatars"
-                ):
-                    if hasattr(ExteraConfig, attr) and not getattr(ExteraConfig, attr):
+                for attr in _EXTERA_VALID_ATTRS:
+                    if not getattr(ExteraConfig, attr, True):
                         try:
                             setattr(ExteraConfig, attr, True)
                             changed = True
@@ -908,25 +911,16 @@ class Plugin(BasePlugin):
         except Exception:
             pass
 
-        # 3. KotoGram
-        try:
-            from org.telegram.messenger import KotoConfig
-            changed = False
-            for attr in ("localPremium", "sendPremiumEmoji", "sendCustomEmoji", "animateAvatars", "autoplayVideo", "loopAvatars"):
-                if hasattr(KotoConfig, attr) and not getattr(KotoConfig, attr):
-                    setattr(KotoConfig, attr, True)
-                    changed = True
-            if changed and hasattr(KotoConfig, "saveConfig"):
-                KotoConfig.saveConfig()
-        except Exception:
-            pass
-
-        # 4. Telegram SharedConfig
+        # 2. Telegram SharedConfig
         try:
             from org.telegram.messenger import SharedConfig
+            if _SHARED_VALID_ATTRS is None:
+                candidate_attrs = ("animateAvatars", "autoplayVideo", "autoplayGifs", "loopStickers")
+                _SHARED_VALID_ATTRS = [a for a in candidate_attrs if hasattr(SharedConfig, a)]
+
             changed_sc = False
-            for attr in ("animateAvatars", "autoplayVideo", "autoplayGifs", "loopStickers"):
-                if hasattr(SharedConfig, attr) and not getattr(SharedConfig, attr):
+            for attr in _SHARED_VALID_ATTRS:
+                if not getattr(SharedConfig, attr, True):
                     setattr(SharedConfig, attr, True)
                     changed_sc = True
             if changed_sc and hasattr(SharedConfig, "saveConfig"):
@@ -1010,7 +1004,11 @@ class Plugin(BasePlugin):
         self._own_uids_cache = set(uids)
         return uids
 
-    def _get_active_accounts_data(self) -> List[Dict[str, Any]]:
+    def _get_active_accounts_data(self, force: bool = False) -> List[Dict[str, Any]]:
+        now = time.time()
+        if not force and self._cached_active_accs is not None and (now - self._cached_active_accs_time) < 15.0:
+            return self._cached_active_accs
+
         accounts = []
         try:
             from org.telegram.messenger import UserConfig
@@ -1071,6 +1069,8 @@ class Plugin(BasePlugin):
                 pass
 
         accounts.sort(key=lambda x: x["acc_idx"])
+        self._cached_active_accs = accounts
+        self._cached_active_accs_time = now
         return accounts
 
     def _get_slot_val(self, acc_idx: int, key: str, default: Any) -> Any:
@@ -1087,61 +1087,8 @@ class Plugin(BasePlugin):
         return default
 
     def _sync_local_ayuconfig(self, acc_idx: Optional[int] = None):
-        try:
-            from com.radolyn.ayugram import AyuConfig
-            from org.telegram.messenger import UserConfig
-            curr_acc = getattr(UserConfig, "selectedAccount", 0)
-            target_acc = curr_acc if acc_idx is None else acc_idx
-            u_cfg = UserConfig.getInstance(target_acc)
-            uid = int(u_cfg.getClientUserId() or 0) if u_cfg else 0
-            sel_p = self._get_profile_dict_for_slot(target_acc, uid)
-            changed = False
-
-            nc = _safe_int(sel_p.get("name_color", 0))
-            if hasattr(AyuConfig, "nameColor") and AyuConfig.nameColor != nc:
-                AyuConfig.nameColor = nc
-                changed = True
-
-            nbg = _safe_int(sel_p.get("name_bg_emoji_id", 0))
-            if hasattr(AyuConfig, "nameCustomEmojiId") and AyuConfig.nameCustomEmojiId != nbg:
-                AyuConfig.nameCustomEmojiId = nbg
-                changed = True
-
-            prc = _safe_int(sel_p.get("profile_color", 0))
-            if hasattr(AyuConfig, "profileColor") and AyuConfig.profileColor != prc:
-                AyuConfig.profileColor = prc
-                changed = True
-
-            pbg = _safe_int(sel_p.get("profile_bg_emoji_id", 0))
-            if hasattr(AyuConfig, "profileCustomEmojiId") and AyuConfig.profileCustomEmojiId != pbg:
-                AyuConfig.profileCustomEmojiId = pbg
-                changed = True
-
-            em_id = _safe_int(sel_p.get("emoji_status_id", 0))
-            if hasattr(AyuConfig, "statusEmojiId") and AyuConfig.statusEmojiId != em_id:
-                AyuConfig.statusEmojiId = em_id
-                changed = True
-
-            if hasattr(AyuConfig, "localPremium") and not AyuConfig.localPremium and sel_p.get("premium", True):
-                AyuConfig.localPremium = True
-                changed = True
-
-            for attr in (
-                "animateAvatars", "autoplayVideo", "loopAvatars",
-                "profileVideos", "profileVideoAutoplay", "streamAvatars",
-                "canAnimateAvatars", "useAyuStatus"
-            ):
-                if hasattr(AyuConfig, attr) and not getattr(AyuConfig, attr):
-                    setattr(AyuConfig, attr, True)
-                    changed = True
-
-            if changed:
-                if hasattr(AyuConfig, "saveConfig"):
-                    AyuConfig.saveConfig()
-                elif hasattr(AyuConfig, "save"):
-                    AyuConfig.save()
-        except Exception:
-            pass
+        """В exteraGram параметры профиля синхронизируются через SyncProfile сервер."""
+        pass
 
     def _set_slot_val(self, acc_idx: int, key: str, val: Any):
         slot_key = f"slot_{acc_idx}_{key}"
@@ -1177,7 +1124,6 @@ class Plugin(BasePlugin):
             "profile_color": prof_c,
             "profile_bg_emoji_id": prof_bg,
             "client_type": "exteraGram",
-            "auth_key": self.get_setting("auth_key", "").strip(),
         }
 
     def get_cached_profile(self, uid: int) -> Optional[Dict[str, Any]]:
@@ -1195,31 +1141,44 @@ class Plugin(BasePlugin):
         self._cache_version += 1
         self._profiles_snapshot = dict(self._profiles_cache)
         self._chats_snapshot = dict(self._chats_cache)
-        self._patched_users.clear()
-        self._patched_chats.clear()
         self._untracked_uids.clear()
         self._untracked_cids.clear()
         self._video_checked_uids.clear()
         self._video_checked_chat_ids.clear()
 
-    def _update_snapshot_partial(self, updated_ids: set):
-        """Инкрементальное обновление snapshot — только изменившиеся uid.
+    def _update_snapshot_partial(self, updated_uids: Optional[Set[int]] = None, updated_cids: Optional[Set[int]] = None):
+        """Инкрементальное обновление snapshot — только изменившиеся uid и cid.
         Для delta-sync: избегаем полного копирования dict при 1000+ профилях."""
         self._cache_version += 1
-        snap = dict(self._profiles_snapshot)  # shallow copy
-        for uid in updated_ids:
-            p = self._profiles_cache.get(uid)
-            if p is not None:
-                snap[uid] = p
-            else:
-                snap.pop(uid, None)
-            self._patched_users.pop(uid, None)
-            self._patched_chats.pop(uid, None)
-            self._untracked_uids.discard(uid)
-            self._untracked_cids.discard(uid)
-            self._video_checked_uids.discard(uid)
-            self._video_checked_chat_ids.discard(uid)
-        self._profiles_snapshot = snap
+
+        # Обратная совместимость для вызова с одним позиционным аргументом-set
+        if updated_cids is None and isinstance(updated_uids, set):
+            # updated_uids содержит uid
+            pass
+
+        if updated_uids:
+            snap_p = dict(self._profiles_snapshot)
+            for uid in updated_uids:
+                p = self._profiles_cache.get(uid)
+                if p is not None:
+                    snap_p[uid] = p
+                else:
+                    snap_p.pop(uid, None)
+                self._untracked_uids.discard(uid)
+                self._video_checked_uids.discard(uid)
+            self._profiles_snapshot = snap_p
+
+        if updated_cids:
+            snap_c = dict(self._chats_snapshot)
+            for cid in updated_cids:
+                c = self._chats_cache.get(cid)
+                if c is not None:
+                    snap_c[cid] = c
+                else:
+                    snap_c.pop(cid, None)
+                self._untracked_cids.discard(cid)
+                self._video_checked_chat_ids.discard(cid)
+            self._chats_snapshot = snap_c
 
     def _parse_items_map(self, raw_data: Any, is_chat: bool = False) -> Dict[int, Dict[str, Any]]:
         result = {}
@@ -1284,6 +1243,7 @@ class Plugin(BasePlugin):
 
         # ── 1. Проверка и выставление видеоаватарки с O(1) кэшем проверенных UID ──
         if uid not in self._video_checked_uids:
+            self._video_checked_uids.add(uid)
             ph = getattr(u, "photo", None)
             if ph is not None:
                 try:
@@ -1294,28 +1254,27 @@ class Plugin(BasePlugin):
                         else:
                             v_sizes = getattr(ph, "video_sizes", None)
                             if v_sizes is not None:
-                                size = v_sizes.size() if hasattr(v_sizes, "size") else len(v_sizes) if hasattr(v_sizes, "__len__") else 0
+                                is_py_v = isinstance(v_sizes, list)
+                                size = len(v_sizes) if is_py_v else (v_sizes.size() if hasattr(v_sizes, "size") else (len(v_sizes) if hasattr(v_sizes, "__len__") else 0))
                                 if size > 0:
                                     ph.has_video = True
                                     ph.flags = fl | 1
                 except Exception:
                     pass
-            self._video_checked_uids.add(uid)
 
         # ── 2. Поиск в lock-free снимке SyncProfile (O(1) Python dict lookup ~30ns) ──
         snap = getattr(self, "_profiles_snapshot", None)
         profile = snap.get(uid) if snap else self.get_cached_profile(uid)
         own_uids = getattr(self, "_own_uids_cache", None)
-        is_my_acc = (uid in own_uids) if own_uids else (uid in self._get_my_active_uids())
+        is_my_acc = (uid in own_uids) if own_uids else False
 
         if not profile:
             if is_my_acc:
-                u.premium = True
                 try:
                     u._sp_v = (cur_ver, uid)
                 except Exception:
                     pass
-                return True
+                return False
             self._untracked_uids.add(uid)
             try:
                 u._sp_v = (cur_ver, 0)
@@ -1371,10 +1330,9 @@ class Plugin(BasePlugin):
                     if st_obj is not None:
                         u.emoji_status = st_obj
                 new_flags |= 0x40000000  # FLAG_EMOJI_STATUS (1 << 30 в flags TLRPC.User)
-                new_flags2 |= 1          # FLAG2_EMOJI_STATUS (1 << 0 в flags2 TLRPC.User)
 
-            # 4. Премиум статус
-            if prem or is_my_acc:
+            # 4. Премиум статус (только согласно правам профиля со стороны сервера)
+            if prem:
                 if not getattr(u, "premium", False):
                     u.premium = True
                 new_flags |= 0x10000000  # FLAG_PREMIUM (1 << 28 в flags TLRPC.User)
@@ -1390,12 +1348,18 @@ class Plugin(BasePlugin):
             except Exception:
                 pass
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_patch_user_tl_object error for uid={uid}: {e}")
             return False
 
     def _patch_full_user_tl_object(self, fu: Any, uid: int) -> bool:
         if not fu or not uid or uid <= 0:
             return False
+
+        cur_ver = self._cache_version
+        sp_v = getattr(fu, "_sp_v", None)
+        if sp_v is not None and isinstance(sp_v, tuple) and len(sp_v) == 2 and sp_v[0] == cur_ver:
+            return bool(sp_v[1])
 
         profile = self.get_cached_profile(uid)
         if not profile:
@@ -1405,10 +1369,12 @@ class Plugin(BasePlugin):
                     if acc_info.get("user_id") == uid:
                         profile = self._get_profile_dict_for_slot(acc_info.get("acc_idx", 0), uid)
                         break
-                if not profile:
-                    profile = {"premium": True}
 
         if not profile:
+            try:
+                fu._sp_v = (cur_ver, 0)
+            except Exception:
+                pass
             return False
 
         try:
@@ -1419,7 +1385,7 @@ class Plugin(BasePlugin):
             em_id = _safe_int(profile.get("emoji_status_id", 0))
 
             prc_obj = _build_peer_color(prc, pbg)
-            if prc_obj is not None:
+            if prc_obj is not None and hasattr(fu, "profile_color"):
                 fu.profile_color = prc_obj
 
             if hasattr(fu, "color"):
@@ -1430,27 +1396,27 @@ class Plugin(BasePlugin):
             if em_id != 0:
                 st_obj = _build_emoji_status(em_id)
                 if st_obj is not None:
-                    fu.custom_status = st_obj
-                    fu.emoji_status = st_obj
+                    try:
+                        fu.custom_status = st_obj
+                    except Exception:
+                        pass
+                    try:
+                        fu.emoji_status = st_obj
+                    except Exception:
+                        pass
                     cur_fu_flags = int(getattr(fu, "flags", 0) or 0)
                     fu.flags = cur_fu_flags | 0x80000  # 1 << 19: custom_status in UserFull
-
-            # Постоянная подпись об использовании SyncProfile в описании («О себе»)
-            badge = "⚡ Этот пользователь использует SyncProfile"
-            cur_about = getattr(fu, "about", None) or ""
-            if "SyncProfile" not in cur_about:
-                if cur_about.strip():
-                    fu.about = f"{cur_about.rstrip()}\n\n{badge}"
-                else:
-                    fu.about = badge
-                cur_fu_flags = int(getattr(fu, "flags", 0) or 0)
-                fu.flags = cur_fu_flags | 2  # FLAG_ABOUT (1 << 1 в TLRPC.UserFull)
 
             if hasattr(fu, "user") and fu.user and _is_user(fu.user):
                 self._patch_user_tl_object(fu.user)
 
+            try:
+                fu._sp_v = (cur_ver, uid)
+            except Exception:
+                pass
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_patch_full_user_tl_object error for uid={uid}: {e}")
             return False
 
     def _patch_chat_tl_object(self, chat: Any) -> bool:
@@ -1469,6 +1435,9 @@ class Plugin(BasePlugin):
             return False
 
         if cid <= 0:
+            return False
+
+        if not _is_chat(chat):
             return False
 
         if cid in self._untracked_cids:
@@ -1490,9 +1459,6 @@ class Plugin(BasePlugin):
                 chat._sp_v = (cur_ver, 0)
             except Exception:
                 pass
-            return False
-
-        if not _is_chat(chat):
             return False
 
         # ── 1. Проверка и выставление видеоаватарки с O(1) кэшем проверенных CID ──
@@ -1579,40 +1545,40 @@ class Plugin(BasePlugin):
             except Exception:
                 pass
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_patch_chat_tl_object error for cid={cid}: {e}")
             return False
 
-    def _patch_full_chat_tl_object(self, fc: Any, chat_id: int) -> bool:
-        if not fc:
-            return False
-        cid = _normalize_chat_id(chat_id or getattr(fc, "id", 0))
-        if cid <= 0:
+    def _patch_full_chat_tl_object(self, fc: Any, cid: int) -> bool:
+        if not fc or cid <= 0:
             return False
 
-        snap = getattr(self, "_chats_snapshot", None)
-        profile = snap.get(cid) if snap else None
-        if profile is None:
-            with self._sync_lock:
-                profile = self._chats_cache.get(cid)
+        cur_ver = self._cache_version
+        sp_v = getattr(fc, "_sp_v", None)
+        if sp_v is not None and isinstance(sp_v, tuple) and len(sp_v) == 2 and sp_v[0] == cur_ver:
+            return bool(sp_v[1])
 
-        if not profile:
+        chat_p = getattr(self, "_chats_snapshot", {}).get(cid)
+        if chat_p is None:
+            chat_p = self._chats_cache.get(cid)
+
+        if not chat_p:
+            try:
+                fc._sp_v = (cur_ver, 0)
+            except Exception:
+                pass
             return False
 
         try:
-            global TLRPC
-            if TLRPC is None:
-                from org.telegram.tgnet import TLRPC as _TLRPC
-                TLRPC = _TLRPC
-
-            nc = _safe_int(profile.get("name_color", 0))
-            nbg = _safe_int(profile.get("name_bg_emoji_id", 0))
-            prc = _safe_int(profile.get("profile_color", 0))
-            pbg = _safe_int(profile.get("profile_bg_emoji_id", 0))
-            em_id = _safe_int(profile.get("emoji_status_id", 0))
-            boost_lvl = _safe_int(profile.get("boost_level", 0))
+            nc = _safe_int(chat_p.get("name_color", 0))
+            nbg = _safe_int(chat_p.get("name_bg_emoji_id", 0))
+            prc = _safe_int(chat_p.get("profile_color", 0))
+            pbg = _safe_int(chat_p.get("profile_bg_emoji_id", 0))
+            em_id = _safe_int(chat_p.get("emoji_status_id", 0))
+            boost_lvl = _safe_int(chat_p.get("boost_level", 0))
 
             prc_obj = _build_peer_color(prc, pbg)
-            if prc_obj is not None:
+            if prc_obj is not None and hasattr(fc, "profile_color"):
                 fc.profile_color = prc_obj
 
             if hasattr(fc, "color"):
@@ -1621,23 +1587,12 @@ class Plugin(BasePlugin):
                     fc.color = nc_obj
 
             if em_id != 0:
-                st = TLRPC.TL_emojiStatus()
-                st.document_id = em_id
-                fc.custom_status = st
-                fc.emoji_status = st
-                cur_fc_flags = int(getattr(fc, "flags", 0) or 0)
-                fc.flags = cur_fc_flags | 512
-
-            # Постоянная подпись об использовании SyncProfile в описании чата/канала
-            badge = "⚡ Этот чат/канал использует SyncProfile"
-            cur_about = getattr(fc, "about", None) or ""
-            if "SyncProfile" not in cur_about:
-                if cur_about.strip():
-                    fc.about = f"{cur_about.rstrip()}\n\n{badge}"
-                else:
-                    fc.about = badge
-                cur_fc_flags = int(getattr(fc, "flags", 0) or 0)
-                fc.flags = cur_fc_flags | 2
+                st_obj = _build_emoji_status(em_id)
+                if st_obj is not None:
+                    fc.custom_status = st_obj
+                    fc.emoji_status = st_obj
+                    cur_fc_flags = int(getattr(fc, "flags", 0) or 0)
+                    fc.flags = cur_fc_flags | 512
 
             if boost_lvl > 0:
                 fc.boosts_applied = boost_lvl
@@ -1645,153 +1600,73 @@ class Plugin(BasePlugin):
             if hasattr(fc, "chat") and fc.chat and _is_chat(fc.chat):
                 self._patch_chat_tl_object(fc.chat)
 
+            try:
+                fc._sp_v = (cur_ver, cid)
+            except Exception:
+                pass
             return True
-        except Exception:
+        except Exception as e:
+            logger.debug(f"_patch_full_chat_tl_object error for cid={cid}: {e}")
             return False
 
-    @staticmethod
-    def _find_profile_info_layout(view: Any, depth: int = 0) -> Any:
-        """Рекурсивно ищет LinearLayout с элементами профиля (TextDetailCell)."""
-        if view is None or depth > 6:
-            return None
-
-        if hasattr(view, "getChildCount") and hasattr(view, "getChildAt") and hasattr(view, "addView"):
-            count = view.getChildCount()
-            for i in range(count):
-                child = view.getChildAt(i)
-                if child is not None:
-                    c_name = child.getClass().getSimpleName() if hasattr(child, "getClass") else ""
-                    if "TextDetail" in c_name or "TextCell" in c_name:
-                        return view
-
-            for i in range(count):
-                res = Plugin._find_profile_info_layout(view.getChildAt(i), depth + 1)
-                if res is not None:
-                    return res
-
-        return None
-
-    def _inject_profile_activity_cell(self, fragment: Any):
-        """Внедряет постоянную карточку TextDetailCell в блок информации ProfileActivity."""
-        if not fragment:
+    def _show_profile_bulletin_if_sync_user(self, fragment: Any):
+        """Показывает всплывающее меню/плашку снизу (Bulletin) при открытии профиля пользователя или чата SyncProfile."""
+        if not fragment or not self.get_setting("show_syncprofile_badge_in_about", True):
             return
 
-        plugin_self = self
-
-        def _do_inject():
-            try:
-                target_id = 0
-                for attr in ("user_id", "userId", "dialog_id", "dialogId"):
-                    val = getattr(fragment, attr, None)
-                    if val is not None:
-                        try:
-                            v_int = int(val)
-                            if v_int != 0:
-                                target_id = v_int
-                                break
-                        except Exception:
-                            pass
-
-                if target_id == 0:
-                    for attr in ("currentUser", "user", "userInfo", "userFull", "currentChat", "chat", "chatInfo", "chatFull"):
-                        obj = getattr(fragment, attr, None)
-                        if obj:
-                            o_id = getattr(obj, "id", 0)
-                            if o_id:
-                                try:
-                                    target_id = int(o_id)
-                                    break
-                                except Exception:
-                                    pass
-
-                if target_id == 0:
-                    return
-
-                is_user_profile = target_id > 0
-                uid = target_id if is_user_profile else 0
-                cid = _normalize_chat_id(abs(target_id)) if not is_user_profile else 0
-
-                has_sync = False
-                if uid > 0:
-                    has_sync = (
-                        plugin_self.get_cached_profile(uid) is not None
-                        or uid in plugin_self._get_my_active_uids()
-                    )
-                elif cid > 0:
-                    snap = getattr(plugin_self, "_chats_snapshot", {})
-                    has_sync = (cid in snap) or (cid in plugin_self._chats_cache)
-
-                frag_view = fragment.getFragmentView() if hasattr(fragment, "getFragmentView") else getattr(fragment, "fragmentView", None)
-                if frag_view is None:
-                    return
-
-                existing_cell = frag_view.findViewWithTag("syncprofile_detail_cell") if hasattr(frag_view, "findViewWithTag") else None
-
-                if not has_sync:
-                    if existing_cell is not None and hasattr(existing_cell, "getParent"):
-                        p = existing_cell.getParent()
-                        if p is not None and hasattr(p, "removeView"):
-                            p.removeView(existing_cell)
-                    return
-
-                if existing_cell is not None:
-                    return
-
-                info_layout = getattr(fragment, "linearLayout", None)
-                if info_layout is None or not hasattr(info_layout, "addView"):
-                    info_layout = Plugin._find_profile_info_layout(frag_view)
-
-                if info_layout is None or not hasattr(info_layout, "addView"):
-                    return
-
-                TextDetailCellClass = find_class("org.telegram.ui.Cells.TextDetailCell")
-                if not TextDetailCellClass:
-                    return
-
-                ctx = fragment.getParentActivity() if hasattr(fragment, "getParentActivity") else (frag_view.getContext() if hasattr(frag_view, "getContext") else None)
-                if not ctx:
-                    return
-
-                cell = TextDetailCellClass(ctx)
-                if hasattr(cell, "setTag"):
-                    cell.setTag("syncprofile_detail_cell")
-
-                cell_text = "Этот пользователь использует SyncProfile" if is_user_profile else "Этот чат/канал использует SyncProfile"
-                cell_subtext = "SyncProfile"
-
-                if hasattr(cell, "setTextAndValue"):
+        try:
+            target_id = 0
+            for attr in ("user_id", "userId", "dialog_id", "dialogId"):
+                val = getattr(fragment, attr, None)
+                if val is not None:
                     try:
-                        cell.setTextAndValue(cell_text, cell_subtext, False)
+                        v_int = int(val)
+                        if v_int != 0:
+                            target_id = v_int
+                            break
                     except Exception:
-                        try:
-                            cell.setTextAndValue(cell_text, cell_subtext)
-                        except Exception:
-                            pass
+                        pass
 
-                # Включаем divider на предыдущей строке карточки (под датой рождения/юзернеймом)
-                if hasattr(info_layout, "getChildCount") and hasattr(info_layout, "getChildAt"):
-                    count = info_layout.getChildCount()
-                    if count > 0:
-                        last_child = info_layout.getChildAt(count - 1)
-                        if last_child is not None and hasattr(last_child, "needDivider"):
+            if target_id == 0:
+                for attr in ("currentUser", "user", "userInfo", "currentChat", "chat", "chatInfo"):
+                    obj = getattr(fragment, attr, None)
+                    if obj:
+                        o_id = getattr(obj, "id", 0)
+                        if o_id:
                             try:
-                                last_child.needDivider = True
-                                if hasattr(last_child, "invalidate"):
-                                    last_child.invalidate()
+                                target_id = int(o_id)
+                                break
                             except Exception:
                                 pass
 
-                if hasattr(cell, "setOnClickListener"):
-                    class CellClickListener:
-                        def onClick(self, v):
-                            bulletins.show_info("✨ Профиль синхронизирован через SyncProfile")
-                    cell.setOnClickListener(CellClickListener())
+            if target_id == 0:
+                return
 
-                info_layout.addView(cell)
-            except Exception as e:
-                log(f"SyncProfile: _inject_profile_activity_cell error: {e}")
+            now = time.time()
+            last_target, last_time = getattr(self, "_last_shown_bulletin", (0, 0.0))
+            if last_target == target_id and (now - last_time) < 10.0:
+                return
 
-        run_on_ui_thread(_do_inject)
+            is_user = target_id > 0
+            uid = target_id if is_user else 0
+            cid = _normalize_chat_id(abs(target_id)) if not is_user else 0
+
+            has_sync = False
+            if uid > 0:
+                has_sync = (
+                    self.get_cached_profile(uid) is not None
+                    or uid in self._get_my_active_uids()
+                )
+            elif cid > 0:
+                snap = getattr(self, "_chats_snapshot", {})
+                has_sync = (cid in snap) or (cid in self._chats_cache)
+
+            if has_sync:
+                self._last_shown_bulletin = (target_id, now)
+                msg = "⚡ Этот пользователь использует SyncProfile" if is_user else "⚡ Этот чат/канал использует SyncProfile"
+                bulletins.show_info(msg)
+        except Exception as e:
+            logger.debug(f"_show_profile_bulletin_if_sync_user error: {e}")
 
     @staticmethod
     def _safe_get_user(mc: Any, uid: int) -> Any:
@@ -1812,11 +1687,10 @@ class Plugin(BasePlugin):
     # ─────────────────────────────────────────────────────────────────────────
 
     def _register_xposed_hooks(self):
-        """Регистрирует канонические хуки на MessagesController, UserConfig, UserObject, DialogsActivity.
-        Гарантирует 120 FPS без просадок и предотвращает сброс выбранной вкладки папок при выходе из диалогов."""
+        """Регистрирует безопасные хуки на MessagesController, ProfileActivity и ChatActivity."""
         try:
-            MessagesControllerClass = find_class("org.telegram.messenger.MessagesController")
             plugin_self = self
+            MessagesControllerClass = find_class("org.telegram.messenger.MessagesController")
 
             if MessagesControllerClass:
                 class GetUserHook(MethodHook):
@@ -1825,8 +1699,8 @@ class Plugin(BasePlugin):
                             user_obj = param.getResult()
                             if user_obj is not None:
                                 plugin_self._patch_user_tl_object(user_obj)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"GetUserHook error: {e}")
 
                 class GetUserFullHook(MethodHook):
                     def after_hooked_method(self, param):
@@ -1836,8 +1710,8 @@ class Plugin(BasePlugin):
                                 uid = getattr(fu_obj, "id", 0)
                                 if uid:
                                     plugin_self._patch_full_user_tl_object(fu_obj, int(uid))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"GetUserFullHook error: {e}")
 
                 class GetChatHook(MethodHook):
                     def after_hooked_method(self, param):
@@ -1845,8 +1719,8 @@ class Plugin(BasePlugin):
                             chat_obj = param.getResult()
                             if chat_obj is not None:
                                 plugin_self._patch_chat_tl_object(chat_obj)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"GetChatHook error: {e}")
 
                 class GetChatFullHook(MethodHook):
                     def after_hooked_method(self, param):
@@ -1856,8 +1730,8 @@ class Plugin(BasePlugin):
                                 cid = getattr(fc_obj, "id", 0)
                                 if cid:
                                     plugin_self._patch_full_chat_tl_object(fc_obj, int(cid))
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"GetChatFullHook error: {e}")
 
                 class PutUserHook(MethodHook):
                     def before_hooked_method(self, param):
@@ -1868,12 +1742,11 @@ class Plugin(BasePlugin):
                                 uid = int(getattr(u_arg, "id", 0) or 0)
                                 if uid > 0:
                                     plugin_self._video_checked_uids.discard(uid)
-                                    plugin_self._patched_uids.discard(uid)
                                     plugin_self._untracked_uids.discard(uid)
                                     setattr(u_arg, "_sp_v", None)
                                 plugin_self._patch_user_tl_object(u_arg)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"PutUserHook error: {e}")
 
                 class PutChatHook(MethodHook):
                     def before_hooked_method(self, param):
@@ -1884,363 +1757,130 @@ class Plugin(BasePlugin):
                                 cid = _normalize_chat_id(getattr(c_arg, "id", 0))
                                 if cid > 0:
                                     plugin_self._video_checked_chat_ids.discard(cid)
-                                    plugin_self._patched_cids.discard(cid)
                                     plugin_self._untracked_cids.discard(cid)
                                     setattr(c_arg, "_sp_v", None)
                                 plugin_self._patch_chat_tl_object(c_arg)
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"PutChatHook error: {e}")
 
-                class PutMessageHook(MethodHook):
+                class PutUsersHook(MethodHook):
                     def before_hooked_method(self, param):
                         try:
                             args = getattr(param, "args", None)
-                            if args and len(args) >= 1:
-                                m_arg = args[0]
-                                if m_arg:
-                                    _patch_message_entities(m_arg)
-                        except Exception:
-                            pass
+                            if args and len(args) >= 1 and args[0] is not None:
+                                u_list = args[0]
+                                is_py = isinstance(u_list, list)
+                                is_java = (not is_py) and hasattr(u_list, "size") and hasattr(u_list, "get")
+                                count = len(u_list) if is_py else (u_list.size() if is_java else len(u_list))
+                                for i in range(count):
+                                    u = u_list[i] if is_py else (u_list.get(i) if is_java else u_list[i])
+                                    if u is not None:
+                                        uid = int(getattr(u, "id", 0) or 0)
+                                        if uid > 0:
+                                            plugin_self._video_checked_uids.discard(uid)
+                                            plugin_self._untracked_uids.discard(uid)
+                                            setattr(u, "_sp_v", None)
+                                        plugin_self._patch_user_tl_object(u)
+                        except Exception as e:
+                            logger.debug(f"PutUsersHook error: {e}")
 
-                class PutMessagesHook(MethodHook):
+                class PutChatsHook(MethodHook):
                     def before_hooked_method(self, param):
                         try:
                             args = getattr(param, "args", None)
-                            if args and len(args) >= 1:
-                                ms_arg = args[0]
-                                if ms_arg:
-                                    is_j = hasattr(ms_arg, "size") and hasattr(ms_arg, "get")
-                                    c = ms_arg.size() if is_j else len(ms_arg)
-                                    for i in range(c):
-                                        m = ms_arg.get(i) if is_j else ms_arg[i]
-                                        if m:
-                                            _patch_message_entities(m)
-                        except Exception:
-                            pass
-
-                class GetDialogFilterHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            f = param.getResult()
-                            if f is not None:
-                                f.locked = False
-                        except Exception:
-                            pass
-
-                class GetDialogFiltersHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            dfs = param.getResult()
-                            if dfs is not None:
-                                c = dfs.size() if hasattr(dfs, "size") else len(dfs)
-                                for i in range(c):
-                                    f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
-                                    if f is not None:
-                                        f.locked = False
-                        except Exception:
-                            pass
-
-                class LoadDialogFiltersHook(MethodHook):
-                    def after_hooked_method(self, param):
-                        try:
-                            this_mc = getattr(param, "thisObject", None)
-                            if this_mc and hasattr(this_mc, "dialogFilters"):
-                                dfs = getattr(this_mc, "dialogFilters", None)
-                                if dfs is not None:
-                                    c = dfs.size() if hasattr(dfs, "size") else len(dfs)
-                                    for i in range(c):
-                                        f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
-                                        if f is not None:
-                                            f.locked = False
-                        except Exception:
-                            pass
-
-                class MessagesControllerLockFiltersHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            this_mc = getattr(param, "thisObject", None)
-                            if this_mc and hasattr(this_mc, "dialogFilters"):
-                                dfs = getattr(this_mc, "dialogFilters", None)
-                                if dfs is not None:
-                                    count = dfs.size() if hasattr(dfs, "size") else len(dfs)
-                                    for i in range(count):
-                                        f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
-                                        if f is not None:
-                                            try:
-                                                f.locked = False
-                                            except Exception:
-                                                pass
-                            try:
-                                param.setResult(False)
-                            except Exception:
-                                try:
-                                    param.setResult(None)
-                                except Exception:
-                                    pass
-                        except Exception:
-                            pass
-
-                class MessagesControllerIsFilterLockedHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            param.setResult(False)
-                        except Exception:
-                            pass
+                            if args and len(args) >= 1 and args[0] is not None:
+                                c_list = args[0]
+                                is_py = isinstance(c_list, list)
+                                is_java = (not is_py) and hasattr(c_list, "size") and hasattr(c_list, "get")
+                                count = len(c_list) if is_py else (c_list.size() if is_java else len(c_list))
+                                for i in range(count):
+                                    c = c_list[i] if is_py else (c_list.get(i) if is_java else c_list[i])
+                                    if c is not None:
+                                        cid = _normalize_chat_id(getattr(c, "id", 0))
+                                        if cid > 0:
+                                            plugin_self._video_checked_chat_ids.discard(cid)
+                                            plugin_self._untracked_cids.discard(cid)
+                                            setattr(c, "_sp_v", None)
+                                        plugin_self._patch_chat_tl_object(c)
+                        except Exception as e:
+                            logger.debug(f"PutChatsHook error: {e}")
 
                 methods = _get_class_methods(MessagesControllerClass)
-
-                user_hooked = False
-                chat_hooked = False
-                user_full_hooked = False
-                chat_full_hooked = False
-                put_user_hooked = False
-                put_chat_hooked = False
-                put_message_hooked = False
-                put_messages_hooked = False
+                hooked_sig = set()
 
                 for m in methods:
                     try:
                         m_name = m.getName()
                         p_types = m.getParameterTypes()
                         num_params = len(p_types)
+                        sig = (m_name, tuple(p.getName() for p in p_types))
+                        if sig in hooked_sig:
+                            continue
 
-                        if not user_hooked and m_name == "getUser" and num_params == 1:
+                        if m_name == "getUser" and num_params >= 1:
                             p0_name = p_types[0].getName()
-                            if p0_name in ("long", "java.lang.Long"):
+                            if p0_name in ("long", "java.lang.Long", "int", "java.lang.Integer"):
                                 m.setAccessible(True)
                                 unhook = self.hook_method(m, GetUserHook())
                                 if unhook:
                                     self._xposed_unhooks.append(unhook)
-                                    user_hooked = True
-                        elif not chat_hooked and m_name == "getChat" and num_params == 1:
+                                    hooked_sig.add(sig)
+                        elif m_name == "getChat" and num_params >= 1:
                             p0_name = p_types[0].getName()
-                            if p0_name in ("long", "java.lang.Long"):
+                            if p0_name in ("long", "java.lang.Long", "int", "java.lang.Integer"):
                                 m.setAccessible(True)
                                 unhook = self.hook_method(m, GetChatHook())
                                 if unhook:
                                     self._xposed_unhooks.append(unhook)
-                                    chat_hooked = True
-                        elif not user_full_hooked and m_name == "getUserFull" and num_params == 1:
+                                    hooked_sig.add(sig)
+                        elif m_name == "getUserFull" and num_params >= 1:
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetUserFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                user_full_hooked = True
-                        elif not chat_full_hooked and m_name == "getChatFull" and num_params == 1:
+                                hooked_sig.add(sig)
+                        elif m_name == "getChatFull" and num_params >= 1:
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetChatFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                chat_full_hooked = True
-                        elif not put_user_hooked and m_name == "putUser" and num_params >= 1:
+                                hooked_sig.add(sig)
+                        elif m_name == "putUser" and num_params >= 1:
                             p0_name = p_types[0].getName()
                             if "User" in p0_name:
                                 m.setAccessible(True)
                                 unhook = self.hook_method(m, PutUserHook())
                                 if unhook:
                                     self._xposed_unhooks.append(unhook)
-                                    put_user_hooked = True
-                        elif not put_chat_hooked and m_name == "putChat" and num_params >= 1:
+                                    hooked_sig.add(sig)
+                        elif m_name == "putChat" and num_params >= 1:
                             p0_name = p_types[0].getName()
                             if "Chat" in p0_name:
                                 m.setAccessible(True)
                                 unhook = self.hook_method(m, PutChatHook())
                                 if unhook:
                                     self._xposed_unhooks.append(unhook)
-                                    put_chat_hooked = True
-                        elif not put_message_hooked and m_name == "putMessage" and num_params >= 1:
+                                    hooked_sig.add(sig)
+                        elif m_name == "putUsers" and num_params >= 1:
                             p0_name = p_types[0].getName()
-                            if "Message" in p0_name:
+                            if "List" in p0_name or "ArrayList" in p0_name or "Collection" in p0_name:
                                 m.setAccessible(True)
-                                unhook = self.hook_method(m, PutMessageHook())
+                                unhook = self.hook_method(m, PutUsersHook())
                                 if unhook:
                                     self._xposed_unhooks.append(unhook)
-                                    put_message_hooked = True
-                        elif not put_messages_hooked and m_name == "putMessages" and num_params >= 1:
+                                    hooked_sig.add(sig)
+                        elif m_name == "putChats" and num_params >= 1:
                             p0_name = p_types[0].getName()
-                            if "Message" in p0_name:
+                            if "List" in p0_name or "ArrayList" in p0_name or "Collection" in p0_name:
                                 m.setAccessible(True)
-                                unhook = self.hook_method(m, PutMessagesHook())
+                                unhook = self.hook_method(m, PutChatsHook())
                                 if unhook:
                                     self._xposed_unhooks.append(unhook)
-                                    put_messages_hooked = True
-                        elif m_name == "getDialogFilter" and num_params == 1:
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, GetDialogFilterHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
-                        elif m_name == "getDialogFilters":
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, GetDialogFiltersHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
-                        elif m_name in ("loadDialogFilters", "loadDialogFiltersInternal"):
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, LoadDialogFiltersHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
-                        elif m_name in ("lockFiltersInternal", "checkFiltersLocked", "lockFilters"):
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, MessagesControllerLockFiltersHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
-                        elif m_name in ("isFilterLocked", "isDialogFilterLocked", "areFiltersLocked"):
-                            m.setAccessible(True)
-                            unhook = self.hook_method(m, MessagesControllerIsFilterLockedHook())
-                            if unhook:
-                                self._xposed_unhooks.append(unhook)
+                                    hooked_sig.add(sig)
                     except Exception as e:
-                        log(f"SyncProfile: hook MessagesController method {m} error: {e}")
+                        logger.debug(f"SyncProfile: hook MessagesController method {m} error: {e}")
 
-            # ── Hook DialogFilter: предотвращает блокировку папок при проверке filter.isLocked() ──
-            for df_name in ("org.telegram.messenger.MessagesController$DialogFilter", "org.telegram.messenger.DialogFilter"):
-                DialogFilterClass = find_class(df_name)
-                if DialogFilterClass:
-                    class DialogFilterIsLockedHook(MethodHook):
-                        def before_hooked_method(self, param):
-                            try:
-                                param.setResult(False)
-                            except Exception:
-                                pass
-
-                    for m in _get_class_methods(DialogFilterClass):
-                        try:
-                            if m.getName() == "isLocked":
-                                m.setAccessible(True)
-                                un = self.hook_method(m, DialogFilterIsLockedHook())
-                                if un:
-                                    self._xposed_unhooks.append(un)
-                        except Exception:
-                            pass
-            # ── Hook MediaDataController: разрешает выбор и отправку кастомных/премиум эмодзи ──
-            MediaDataControllerClass = find_class("org.telegram.messenger.MediaDataController")
-            if MediaDataControllerClass:
-                class MediaDataControllerCanUseEmojiHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            param.setResult(True)
-                        except Exception:
-                            pass
-
-                for m in _get_class_methods(MediaDataControllerClass):
-                    try:
-                        m_name = m.getName()
-                        if m_name in (
-                            "canUseCustomEmoji",
-                            "isCustomEmojiAvailable",
-                            "canUsePremiumSticker",
-                            "canUseReaction",
-                            "isCustomEmojiAllowed",
-                        ):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, MediaDataControllerCanUseEmojiHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
-                    except Exception:
-                        pass
-
-            # ── Hook AlertsCreator: блокирует показ окна блокировки при выборе прем-эмодзи ──
-            AlertsCreatorClass = find_class("org.telegram.ui.Components.AlertsCreator")
-            if AlertsCreatorClass:
-                class AlertsCreatorDismissHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            param.setResult(None)
-                        except Exception:
-                            pass
-
-                for m in _get_class_methods(AlertsCreatorClass):
-                    try:
-                        if m.getName() in ("showCustomEmojiPremiumAlert", "showCustomEmojiAlert"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, AlertsCreatorDismissHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
-                    except Exception:
-                        pass
-
-            # ── Hook DialogsActivity: предотвращает сброс выбранной вкладки папки при выходе из чата ──
-            DialogsActivityClass = find_class("org.telegram.ui.DialogsActivity")
-            if DialogsActivityClass:
-                class DialogsActivityCheckFilterLockedHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            param.setResult(False)
-                        except Exception:
-                            try:
-                                param.setResult(None)
-                            except Exception:
-                                pass
-
-                class DialogsActivityResumeHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            this_act = getattr(param, "thisObject", None)
-                            if this_act:
-                                this_act._sp_in_resume = True
-                                mc = getattr(this_act, "getMessagesController", None)
-                                if mc:
-                                    mc_inst = mc()
-                                    if mc_inst and hasattr(mc_inst, "dialogFilters"):
-                                        dfs = getattr(mc_inst, "dialogFilters", None)
-                                        if dfs is not None:
-                                            c = dfs.size() if hasattr(dfs, "size") else len(dfs)
-                                            for i in range(c):
-                                                f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
-                                                if f is not None:
-                                                    f.locked = False
-                        except Exception:
-                            pass
-
-                    def after_hooked_method(self, param):
-                        try:
-                            this_act = getattr(param, "thisObject", None)
-                            if this_act:
-                                this_act._sp_in_resume = False
-                        except Exception:
-                            pass
-
-                class DialogsActivitySwitchFolderHook(MethodHook):
-                    def before_hooked_method(self, param):
-                        try:
-                            this_act = getattr(param, "thisObject", None)
-                            args = getattr(param, "args", None)
-                            if args and len(args) > 0:
-                                target_id = args[0]
-                                if target_id != 0:
-                                    if this_act:
-                                        this_act._sp_active_folder = target_id
-                                elif target_id == 0:
-                                    if this_act and getattr(this_act, "_sp_in_resume", False):
-                                        active = getattr(this_act, "_sp_active_folder", 0)
-                                        cur_id = getattr(this_act, "currentFilterId", 0)
-                                        if active != 0 or cur_id != 0:
-                                            param.setResult(None)
-                        except Exception:
-                            pass
-
-                for m in _get_class_methods(DialogsActivityClass):
-                    try:
-                        m_name = m.getName()
-                        if m_name in ("checkFilterLocked", "checkFiltersLocked"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, DialogsActivityCheckFilterLockedHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
-                        elif m_name in ("onResume", "updateFilterTabs"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, DialogsActivityResumeHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
-                        elif m_name in ("switchToFolder", "selectFolder", "showFolder"):
-                            m.setAccessible(True)
-                            un = self.hook_method(m, DialogsActivitySwitchFolderHook())
-                            if un:
-                                self._xposed_unhooks.append(un)
-                    except Exception:
-                        pass
-
-            # ── Hook ProfileActivity: добавлять ячейку SyncProfile в карточку профиля ──
+            # ── Hook ProfileActivity: добавление плашки SyncProfile в карточку профиля ──
             ProfileActivityClass = find_class("org.telegram.ui.ProfileActivity")
             if ProfileActivityClass:
                 class ProfileActivityHook(MethodHook):
@@ -2248,34 +1888,34 @@ class Plugin(BasePlugin):
                         try:
                             this_frag = getattr(param, "thisObject", None)
                             if this_frag:
-                                plugin_self._inject_profile_activity_cell(this_frag)
-                        except Exception:
-                            pass
+                                plugin_self._show_profile_bulletin_if_sync_user(this_frag)
+                        except Exception as e:
+                            logger.debug(f"ProfileActivityHook error: {e}")
 
                 for m in _get_class_methods(ProfileActivityClass):
                     try:
                         m_name = m.getName()
-                        if m_name in ("onResume", "createView"):
+                        if m_name == "onResume":
                             m.setAccessible(True)
                             un = self.hook_method(m, ProfileActivityHook())
                             if un:
                                 self._xposed_unhooks.append(un)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Hook ProfileActivity error: {e}")
 
-            # ── Hook ChatActivity & ChatMessageCell: захват выбранного сообщения для контекстного меню ──
+            # ── Hook ChatActivity & ChatMessageCell: контекстное меню для ID эмодзи ──
             ChatActivityClass = find_class("org.telegram.ui.ChatActivity")
             if ChatActivityClass:
                 class ChatActivityMenuHook(MethodHook):
                     def before_hooked_method(self, param):
                         try:
                             args = getattr(param, "args", None)
-                            if args and len(args) > 0 and args[0] is not None:
+                            if args and len(args) > 0 and args[0] is not None and not isinstance(args[0], int):
                                 plugin_self._last_selected_message = args[0]
                             elif getattr(param, "thisObject", None) is not None:
                                 plugin_self._last_selected_message = param.thisObject
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"ChatActivityMenuHook error: {e}")
 
                 for m in _get_class_methods(ChatActivityClass):
                     try:
@@ -2287,14 +1927,13 @@ class Plugin(BasePlugin):
                             "openMenuForCell",
                             "onItemLongClick",
                             "createActionsMenu",
-                            "processSelectedOption",
                         ):
                             m.setAccessible(True)
                             un = self.hook_method(m, ChatActivityMenuHook())
                             if un:
                                 self._xposed_unhooks.append(un)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Hook ChatActivity error: {e}")
 
             ChatMessageCellClass = find_class("org.telegram.ui.Cells.ChatMessageCell")
             if ChatMessageCellClass:
@@ -2306,8 +1945,8 @@ class Plugin(BasePlugin):
                                 plugin_self._last_selected_message = this_obj
                             elif getattr(param, "args", None):
                                 plugin_self._last_selected_message = param.args[0]
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            logger.debug(f"ChatMessageCellMenuHook error: {e}")
 
                 for m in _get_class_methods(ChatMessageCellClass):
                     try:
@@ -2317,12 +1956,12 @@ class Plugin(BasePlugin):
                             un = self.hook_method(m, ChatMessageCellMenuHook())
                             if un:
                                 self._xposed_unhooks.append(un)
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        logger.debug(f"Hook ChatMessageCell error: {e}")
 
             log(f"SyncProfile: Установлено {len(self._xposed_unhooks)} хуков.")
         except Exception as e:
-            log(f"SyncProfile: Ошибка регистрации хуков: {e}")
+            logger.error(f"SyncProfile: Ошибка регистрации хуков: {e}")
 
     def _unregister_xposed_hooks(self):
         for unhook in self._xposed_unhooks:
@@ -2368,6 +2007,29 @@ class Plugin(BasePlugin):
             return intervals[idx]
         return 120
 
+    def _trim_memory_caches(self):
+        """Периодическая очистка кэшей памяти для предотвращения утечек при долгой сессии."""
+        self._trim_cache(_emoji_status_cache, 200)
+        self._trim_cache(_peer_color_cache, 200)
+        self._trim_cache(_EMOJI_DOC_ID_CACHE, 500)
+        if len(self._video_checked_uids) > 1000:
+            self._video_checked_uids.clear()
+            self._video_avatar_uids.clear()
+        if len(self._video_checked_chat_ids) > 500:
+            self._video_checked_chat_ids.clear()
+        if len(self._untracked_uids) > 5000:
+            self._untracked_uids.clear()
+        if len(self._untracked_cids) > 2000:
+            self._untracked_cids.clear()
+        if len(_PATCHED_MSGS) > 2000:
+            _PATCHED_MSGS.clear()
+        if len(_USER_CLASS_CACHE) > 100:
+            _USER_CLASS_CACHE.clear()
+        if len(_CHAT_CLASS_CACHE) > 100:
+            _CHAT_CLASS_CACHE.clear()
+        if len(_FIND_CLASS_CACHE) > 200:
+            _FIND_CLASS_CACHE.clear()
+
     def _keep_alive_sync_loop(self):
         """Синхронный keep-alive loop. Использует threading.Event.wait() вместо
         time.sleep() — немедленно прерывается при вызове on_plugin_unload."""
@@ -2383,15 +2045,7 @@ class Plugin(BasePlugin):
                     self._consecutive_errors = 0
                 except Exception:
                     self._consecutive_errors = min(self._consecutive_errors + 1, 3)
-            # Ограничиваем рост глобальных кэшей TL-объектов
-            self._trim_cache(_emoji_status_cache, 200)
-            self._trim_cache(_peer_color_cache, 200)
-            # Ограничиваем кэш проверенных видеоаватарок
-            if len(self._video_checked_uids) > 1000:
-                self._video_checked_uids.clear()
-                self._video_avatar_uids.clear()
-            if len(self._video_checked_chat_ids) > 500:
-                self._video_checked_chat_ids.clear()
+            self._trim_memory_caches()
 
     async def _async_keep_alive_sync_loop(self):
         """Async keep-alive loop с настраиваемым интервалом автообновления."""
@@ -2407,13 +2061,74 @@ class Plugin(BasePlugin):
                     self._consecutive_errors = 0
                 except Exception:
                     self._consecutive_errors = min(self._consecutive_errors + 1, 3)
-            self._trim_cache(_emoji_status_cache, 200)
-            self._trim_cache(_peer_color_cache, 200)
-            if len(self._video_checked_uids) > 1000:
-                self._video_checked_uids.clear()
-                self._video_avatar_uids.clear()
-            if len(self._video_checked_chat_ids) > 500:
-                self._video_checked_chat_ids.clear()
+            self._trim_memory_caches()
+
+    def _api_request(
+        self,
+        method: str,
+        path: str,
+        payload: Optional[Dict[str, Any]] = None,
+        custom_headers: Optional[Dict[str, str]] = None,
+        timeout: float = 8.0,
+        retries: int = 0,
+        backoff_factor: float = 0.5,
+    ) -> Tuple[int, Optional[Any], Optional[str]]:
+        """Единый метод выполнения HTTP-запросов к серверу синхронизации с retry и backoff.
+        Возвращает кортеж: (status_code, parsed_data_or_none, error_message_or_none).
+        """
+        if ALLOW_CUSTOM_SERVER_CONFIG:
+            server_url = self.get_setting("server_url", DEFAULT_SERVER_URL).rstrip("/")
+            cookie_val = self.get_setting("custom_cookie", DEFAULT_SECRET_COOKIE).strip()
+        else:
+            server_url = DEFAULT_SERVER_URL.rstrip("/")
+            cookie_val = DEFAULT_SECRET_COOKIE.strip()
+        url = f"{server_url}/{path.lstrip('/')}"
+
+        headers = {
+            "User-Agent": f"SyncProfile/{__version__}",
+            "Cookie": f"{COOKIE_NAME}={cookie_val}",
+        }
+        if custom_headers:
+            headers.update(custom_headers)
+
+        data_bytes = None
+        if payload is not None:
+            data_bytes = json.dumps(payload).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+
+        attempt = 0
+        max_attempts = max(1, retries + 1)
+        last_error = None
+
+        while attempt < max_attempts:
+            attempt += 1
+            try:
+                req = urllib.request.Request(url, data=data_bytes, headers=headers, method=method.upper())
+                with urllib.request.urlopen(req, timeout=timeout) as resp:
+                    status = resp.status
+                    body = resp.read().decode("utf-8")
+                    parsed = None
+                    if body.strip():
+                        try:
+                            parsed = json.loads(body)
+                        except Exception:
+                            parsed = body
+                    return (status, parsed, None)
+            except urllib.error.HTTPError as he:
+                last_error = f"HTTP {he.code}"
+                logger.debug(f"_api_request {method} {url} HTTP error: {he.code}")
+                # HTTP 304, 400, 401, 403, 404 не требуют повтора
+                if he.code in (304, 400, 401, 403, 404):
+                    return (he.code, None, last_error)
+                if attempt < max_attempts:
+                    time.sleep(backoff_factor * (2 ** (attempt - 1)))
+            except Exception as e:
+                last_error = str(e)
+                logger.debug(f"_api_request {method} {url} error (attempt {attempt}/{max_attempts}): {e}")
+                if attempt < max_attempts:
+                    time.sleep(backoff_factor * (2 ** (attempt - 1)))
+
+        return (0, None, last_error or "Network error")
 
     def _sync_database_action(self, view: Any = None):
         if HAS_ZWYLIB:
@@ -2433,95 +2148,81 @@ class Plugin(BasePlugin):
         )
 
     def _sync_database(self, show_bulletin: bool = False, force_clean: bool = True):
-        if self._sync_in_progress:
-            if show_bulletin:
-                bulletins.show_info("Синхронизация уже выполняется...")
-            return
-        self._sync_in_progress = True
-
-        server_url = self.get_setting("server_url", DEFAULT_SERVER_URL).rstrip("/")
-        cookie_val = self.get_setting("custom_cookie", DEFAULT_SECRET_COOKIE).strip()
+        with self._sync_op_lock:
+            if self._sync_in_progress:
+                if show_bulletin:
+                    bulletins.show_info("Синхронизация уже выполняется...")
+                return
+            self._sync_in_progress = True
 
         try:
-            url = f"{server_url}/api/profiles/all"
-            headers = {
-                "User-Agent": f"SyncProfile/{__version__}",
-                "Cookie": f"{COOKIE_NAME}={cookie_val}",
-            }
+            headers = {}
             last_ts = self.get_setting("_last_sync_timestamp", 0)
             if not force_clean and last_ts > 0:
                 headers["If-Modified-Since"] = str(last_ts)
 
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=8) as resp:
-                if resp.status == 304:
-                    if show_bulletin:
-                        bulletins.show_info("Синхронизация: База данных уже актуальна.")
-                    return
+            status, data, err = self._api_request(
+                "GET",
+                "api/profiles/all",
+                custom_headers=headers if headers else None,
+                timeout=8.0,
+                retries=1,
+                backoff_factor=1.0,
+            )
 
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    profiles_raw = data.get("profiles", {})
-                    if isinstance(profiles_raw, dict):
-                        profiles_list = list(profiles_raw.values())
-                    else:
-                        profiles_list = profiles_raw
-
-                    chats_raw = data.get("chats", {})
-                    if isinstance(chats_raw, dict):
-                        chats_list = list(chats_raw.values())
-                    elif isinstance(chats_raw, list):
-                        chats_list = chats_raw
-                    else:
-                        chats_list = []
-
-                    server_ts = data.get("sync_time") or data.get("server_time") or data.get("timestamp") or int(time.time())
-
-                    with self._sync_lock:
-                        if force_clean:
-                            my_uids = self._get_my_active_uids()
-                            preserved = {uid: p for uid, p in self._profiles_cache.items() if uid in my_uids}
-                            self._profiles_cache = preserved
-                            self._chats_cache.clear()
-
-                        for p in profiles_list:
-                            uid = p.get("user_id")
-                            if uid:
-                                self._profiles_cache[int(uid)] = p
-
-                        for c in chats_list:
-                            cid = c.get("chat_id") if "chat_id" in c else c.get("id")
-                            if cid:
-                                n_cid = _normalize_chat_id(cid)
-                                if n_cid > 0:
-                                    self._chats_cache[n_cid] = c
-
-                        self._cache_dirty = True
-
-                    self._update_snapshot()
-                    self.set_setting("_last_sync_timestamp", server_ts, reload_settings=False)
-                    self._save_local_profiles_cache()
-
-                    if show_bulletin:
-                        bulletins.show_success(f"База обновлена! Загружено профилей: {len(profiles_list)}")
-                    return
-
-            if show_bulletin:
-                bulletins.show_error(f"Сервер ответил кодом: {resp.status}")
-        except urllib.error.HTTPError as he:
-            if he.code == 304:
+            if status == 304:
                 if show_bulletin:
                     bulletins.show_info("Синхронизация: База данных уже актуальна.")
                 return
-            logger.error(f"Sync database HTTP error: {he.code}")
+
+            if status == 200 and data is not None:
+                profiles_map = self._parse_items_map(data.get("profiles", data.get("data", data)) if isinstance(data, dict) else data, is_chat=False)
+                chats_map = self._parse_items_map(data.get("chats", {}) if isinstance(data, dict) else {}, is_chat=True)
+                server_ts = (data.get("sync_time") or data.get("server_time") or data.get("timestamp")) if isinstance(data, dict) else int(time.time())
+
+                with self._sync_lock:
+                    if force_clean:
+                        my_uids = self._get_my_active_uids()
+                        preserved = {uid: p for uid, p in self._profiles_cache.items() if uid in my_uids}
+                        self._profiles_cache = preserved
+                        self._chats_cache.clear()
+
+                    for uid, p in profiles_map.items():
+                        self._profiles_cache[uid] = p
+
+                    for cid, c in chats_map.items():
+                        self._chats_cache[cid] = c
+
+                    self._cache_dirty = True
+
+                self._untracked_uids.clear()
+                self._untracked_cids.clear()
+                self._video_checked_uids.clear()
+                self._video_checked_chat_ids.clear()
+                self._update_snapshot()
+                self.set_setting("_last_sync_timestamp", server_ts, reload_settings=False)
+                self._save_local_profiles_cache()
+
+                if show_bulletin:
+                    bulletins.show_success(f"База обновлена! Загружено профилей: {len(profiles_map)}")
+                return
+
             if show_bulletin:
-                bulletins.show_error(f"HTTP ошибка: {he.code}")
+                if status == 401:
+                    bulletins.show_error("Ошибка 401: Доступ к серверу синхронизации ограничен.")
+                elif status == 403:
+                    bulletins.show_error("Ошибка 403: Доступ запрещён.")
+                elif status > 0:
+                    bulletins.show_error(f"Сервер ответил кодом: {status}")
+                else:
+                    bulletins.show_error(f"Ошибка загрузки базы: {err or 'Неизвестная ошибка'}")
         except Exception as e:
             logger.error(f"Sync database error: {e}")
             if show_bulletin:
                 bulletins.show_error(f"Ошибка загрузки базы: {e}")
         finally:
-            self._sync_in_progress = False
+            with self._sync_op_lock:
+                self._sync_in_progress = False
 
     def sync_delta_updates_from_server(self, show_bulletin: bool = True):
         threading.Thread(target=self._sync_delta_worker, args=(show_bulletin,), daemon=True).start()
@@ -2531,99 +2232,62 @@ class Plugin(BasePlugin):
         await loop.run_in_executor(None, lambda: self._sync_delta_worker(show_bulletin))
 
     def _sync_delta_worker(self, show_bulletin: bool):
-        if self._sync_in_progress:
-            return
-        self._sync_in_progress = True
-
-        server_url = self.get_setting("server_url", DEFAULT_SERVER_URL).rstrip("/")
-        cookie_val = self.get_setting("custom_cookie", DEFAULT_SECRET_COOKIE).strip()
-        last_ts = self.get_setting("_last_sync_timestamp", 0)
+        with self._sync_op_lock:
+            if self._sync_in_progress:
+                return
+            self._sync_in_progress = True
 
         try:
-            url = f"{server_url}/api/profiles/updates?since={last_ts}"
-            headers = {
-                "User-Agent": f"SyncProfile/{__version__}",
-                "Cookie": f"{COOKIE_NAME}={cookie_val}",
-            }
-            req = urllib.request.Request(url, headers=headers)
-            with urllib.request.urlopen(req, timeout=6) as resp:
-                if resp.status == 304:
-                    if show_bulletin:
-                        bulletins.show_info("Изменений нет — профили актуальны.")
-                    return
+            last_ts = self.get_setting("_last_sync_timestamp", 0)
+            status, data, err = self._api_request(
+                "GET",
+                f"api/profiles/updates?since={last_ts}",
+                timeout=6.0,
+                retries=1,
+                backoff_factor=1.0,
+            )
 
-                if resp.status == 200:
-                    data = json.loads(resp.read().decode("utf-8"))
-                    new_cache = data.get("profiles", {})
-                    new_chats = data.get("chats", {})
-                    new_ts = data.get("sync_time") or data.get("server_time") or data.get("timestamp") or int(time.time())
-
-                    if new_cache or new_chats:
-                        updated_ids = set()
-                        with self._sync_lock:
-                            if isinstance(new_cache, dict):
-                                for uid_str, p in new_cache.items():
-                                    try:
-                                        u_id = int(uid_str)
-                                        self._profiles_cache[u_id] = p
-                                        updated_ids.add(u_id)
-                                        self._cache_dirty = True
-                                    except ValueError:
-                                        continue
-                            elif isinstance(new_cache, list):
-                                for p in new_cache:
-                                    if isinstance(p, dict):
-                                        u_id = p.get("user_id") or p.get("id")
-                                        if u_id:
-                                            u_id = int(u_id)
-                                            self._profiles_cache[u_id] = p
-                                            updated_ids.add(u_id)
-                                            self._cache_dirty = True
-
-                            if isinstance(new_chats, dict):
-                                for cid_str, c in new_chats.items():
-                                    try:
-                                        c_id = _normalize_chat_id(cid_str)
-                                        if c_id > 0:
-                                            self._chats_cache[c_id] = c
-                                            self._cache_dirty = True
-                                    except Exception:
-                                        continue
-                            elif isinstance(new_chats, list):
-                                for c in new_chats:
-                                    if isinstance(c, dict):
-                                        c_id = _normalize_chat_id(c.get("chat_id") if "chat_id" in c else c.get("id"))
-                                        if c_id > 0:
-                                            self._chats_cache[c_id] = c
-                                            self._cache_dirty = True
-
-                        self._update_snapshot_partial(updated_ids)
-                        self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
-                        self._save_local_profiles_cache()
-
-                        if show_bulletin:
-                            bulletins.show_success(f"Получено {len(new_cache)} обновлений профилей!")
-                    else:
-                        self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
-                        if show_bulletin:
-                            bulletins.show_info("Изменений нет.")
-                    return
-            if show_bulletin:
-                bulletins.show_error(f"Сервер ответил кодом {resp.status}")
-        except urllib.error.HTTPError as he:
-            if he.code == 304:
+            if status == 304:
                 if show_bulletin:
                     bulletins.show_info("Изменений нет — профили актуальны.")
                 return
-            logger.error(f"Delta sync HTTP error: {he.code}")
-            if show_bulletin:
-                bulletins.show_error(f"HTTP ошибка: {he.code}")
+
+            if status == 200 and data is not None:
+                profiles_map = self._parse_items_map(data.get("profiles", data.get("data", data)) if isinstance(data, dict) else data, is_chat=False)
+                chats_map = self._parse_items_map(data.get("chats", {}) if isinstance(data, dict) else {}, is_chat=True)
+                new_ts = (data.get("sync_time") or data.get("server_time") or data.get("timestamp")) if isinstance(data, dict) else int(time.time())
+
+                if profiles_map or chats_map:
+                    with self._sync_lock:
+                        for u_id, p in profiles_map.items():
+                            self._profiles_cache[u_id] = p
+                            self._cache_dirty = True
+                        for c_id, c in chats_map.items():
+                            self._chats_cache[c_id] = c
+                            self._cache_dirty = True
+
+                    self._untracked_uids.clear()
+                    self._untracked_cids.clear()
+                    self._update_snapshot_partial(updated_uids=set(profiles_map.keys()), updated_cids=set(chats_map.keys()))
+                    self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
+                    self._save_local_profiles_cache()
+
+                    if show_bulletin:
+                        bulletins.show_success(f"Получено обновлений: {len(profiles_map)} профилей, {len(chats_map)} чатов!")
+                else:
+                    self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
+                    if show_bulletin:
+                        bulletins.show_info("Изменений нет — профили актуальны.")
+            else:
+                if show_bulletin and err:
+                    bulletins.show_error(f"Ошибка проверки обновлений: {err}")
         except Exception as e:
-            logger.error(f"Delta sync error: {e}")
+            logger.debug(f"Delta sync error: {e}")
             if show_bulletin:
                 bulletins.show_error(f"Ошибка синхронизации: {e}")
         finally:
-            self._sync_in_progress = False
+            with self._sync_op_lock:
+                self._sync_in_progress = False
 
     def _apply_all_to_all_accounts(self):
         """Обновляет TL-объекты собственных аккаунтов (цвет, premium, эмодзи).
@@ -2695,24 +2359,8 @@ class Plugin(BasePlugin):
                                 # Прямые curr_u.color = ... триггерят NotificationCenter → сброс фрагментов.
                                 # _patch_user_tl_object имеет ранний выход «если уже выставлено».
                                 plugin_self._patch_user_tl_object(curr_u)
-
-                                # Разблокируем все вкладки папок, предотвращая сброс на «Все чаты»
-                                try:
-                                    mc = MessagesController.getInstance(acc_idx)
-                                    if mc and hasattr(mc, "dialogFilters"):
-                                        dfs = getattr(mc, "dialogFilters", None)
-                                        if dfs:
-                                            count = dfs.size() if hasattr(dfs, "size") else len(dfs)
-                                            for i in range(count):
-                                                f = dfs.get(i) if hasattr(dfs, "get") else dfs[i]
-                                                if f:
-                                                    f.locked = False
-                                except Exception:
-                                    pass
                             except Exception:
                                 pass
-
-                        plugin_self._sync_local_ayuconfig()
                     except Exception as e:
                         log(f"SyncProfile: _apply_all ui_apply error: {e}")
 
@@ -2745,42 +2393,37 @@ class Plugin(BasePlugin):
         self._own_apply_cache.pop(uid, None)
         payload = self._get_profile_dict_for_slot(acc_idx, uid)
         def worker():
-            server_url = self.get_setting("server_url", DEFAULT_SERVER_URL).rstrip("/")
-            cookie_val = self.get_setting("custom_cookie", DEFAULT_SECRET_COOKIE).strip()
             try:
-                url = f"{server_url}/api/profile"
-                data = json.dumps(payload).encode("utf-8")
-                headers = {
-                    "Content-Type": "application/json",
-                    "User-Agent": f"SyncProfile/{__version__}",
-                    "Cookie": f"{COOKIE_NAME}={cookie_val}",
-                }
-                req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-                with urllib.request.urlopen(req, timeout=6) as resp:
-                    if resp.status == 200:
-                        with self._sync_lock:
-                            self._profiles_cache[uid] = payload
-                            self._cache_dirty = True
-                        self._update_snapshot()
-                        self._save_local_profiles_cache()
-                        self._apply_all_to_all_accounts()
-                        if show_ui_bulletin:
-                            bulletins.show_success(
-                                f"🚀 Профиль {name} (ID: {uid}) опубликован!\nЦвет: #{payload['name_color']} | Обложка: #{payload['profile_color']}"
-                            )
-                        return
+                status, data, err = self._api_request(
+                    "POST",
+                    "api/profile",
+                    payload=payload,
+                    timeout=6.0,
+                    retries=2,
+                    backoff_factor=0.5,
+                )
+                if status == 200:
+                    with self._sync_lock:
+                        self._profiles_cache[uid] = payload
+                        self._cache_dirty = True
+                    self._update_snapshot()
+                    self._save_local_profiles_cache()
+                    self._apply_all_to_all_accounts()
+                    if show_ui_bulletin:
+                        bulletins.show_success(
+                            f"🚀 Профиль {name} (ID: {uid}) опубликован!\nЦвет: #{payload['name_color']} | Обложка: #{payload['profile_color']}"
+                        )
+                    return
+
                 if show_ui_bulletin:
-                    bulletins.show_error(f"Ошибка публикации: Сервер вернул код {resp.status}")
-            except urllib.error.HTTPError as he:
-                if he.code == 403:
-                    if show_ui_bulletin:
-                        bulletins.show_error("Ошибка 403: Неверный токен авторизации (auth_key).")
-                elif he.code == 401:
-                    if show_ui_bulletin:
-                        bulletins.show_error("Ошибка 401: Доступ заблокирован (проверьте Cookie).")
-                else:
-                    if show_ui_bulletin:
-                        bulletins.show_error(f"Ошибка сервера: {he.code}")
+                    if status == 403:
+                        bulletins.show_error("Ошибка 403: Доступ запрещён.")
+                    elif status == 401:
+                        bulletins.show_error("Ошибка 401: Доступ к серверу синхронизации ограничен.")
+                    elif status > 0:
+                        bulletins.show_error(f"Ошибка сервера: {status}")
+                    else:
+                        bulletins.show_error(f"Сетевая ошибка: {err or 'Неизвестная ошибка'}")
             except Exception as e:
                 logger.error(f"Ошибка отправки профиля: {e}")
                 if show_ui_bulletin:
@@ -2800,36 +2443,43 @@ class Plugin(BasePlugin):
             self._own_apply_cache.pop(acc.get("user_id", 0), None)
 
         def worker():
-            server_url = self.get_setting("server_url", DEFAULT_SERVER_URL).rstrip("/")
-            cookie_val = self.get_setting("custom_cookie", DEFAULT_SECRET_COOKIE).strip()
             success_count = 0
             errors = []
 
-            for acc_info in active_accs:
+            def _push_single_acc(acc_info):
                 acc_idx = acc_info["acc_idx"]
                 uid = acc_info["user_id"]
                 name = acc_info["name"]
-
                 payload = self._get_profile_dict_for_slot(acc_idx, uid)
                 try:
-                    url = f"{server_url}/api/profile"
-                    data = json.dumps(payload).encode("utf-8")
-                    headers = {
-                        "Content-Type": "application/json",
-                        "User-Agent": f"SyncProfile/{__version__}",
-                        "Cookie": f"{COOKIE_NAME}={cookie_val}",
-                    }
-                    req = urllib.request.Request(url, data=data, headers=headers, method="POST")
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        if resp.status == 200:
-                            success_count += 1
-                            with self._sync_lock:
-                                self._profiles_cache[uid] = payload
-                                self._cache_dirty = True
-                        else:
-                            errors.append(f"{name}: HTTP {resp.status}")
+                    status, data, err = self._api_request(
+                        "POST",
+                        "api/profile",
+                        payload=payload,
+                        timeout=5.0,
+                        retries=1,
+                        backoff_factor=0.5,
+                    )
+                    return acc_info, status, data, err, payload, None
                 except Exception as e:
-                    errors.append(f"{name}: {str(e)[:30]}")
+                    return acc_info, 0, None, None, payload, e
+
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(len(active_accs), 4)) as executor:
+                results = list(executor.map(_push_single_acc, active_accs))
+
+            for acc_info, status, data, err, payload, exc in results:
+                name = acc_info["name"]
+                uid = acc_info["user_id"]
+                if exc is not None:
+                    errors.append(f"{name}: {str(exc)[:30]}")
+                elif status == 200:
+                    success_count += 1
+                    with self._sync_lock:
+                        self._profiles_cache[uid] = payload
+                        self._cache_dirty = True
+                else:
+                    errors.append(f"{name}: {err or f'HTTP {status}'}")
 
             if success_count > 0:
                 self._update_snapshot()
@@ -2865,8 +2515,13 @@ class Plugin(BasePlugin):
             try:
                 import os
                 cache_path = "sync_profiles_cache.json"
-                with open(cache_path, "w", encoding="utf-8") as f:
+                tmp_path = "sync_profiles_cache.json.tmp"
+                with open(tmp_path, "w", encoding="utf-8") as f:
                     json.dump(cache_copy, f, ensure_ascii=False)
+                if os.path.exists(cache_path):
+                    os.replace(tmp_path, cache_path)
+                else:
+                    os.rename(tmp_path, cache_path)
                 return
             except Exception:
                 pass
@@ -3463,31 +3118,27 @@ class Plugin(BasePlugin):
             return
 
         def worker():
-            server_url = self.get_setting("server_url", DEFAULT_SERVER_URL).rstrip("/")
-            cookie_val = self.get_setting("custom_cookie", DEFAULT_SECRET_COOKIE).strip()
-
             try:
-                url = f"{server_url}/api/profile/{user_id}"
-                headers = {
-                    "User-Agent": f"SyncProfile/{__version__}",
-                    "Cookie": f"{COOKIE_NAME}={cookie_val}",
-                }
-                req = urllib.request.Request(url, headers=headers)
-                with urllib.request.urlopen(req, timeout=6) as resp:
-                    if resp.status == 200:
-                        resp_data = json.loads(resp.read().decode("utf-8"))
-                        prof = resp_data.get("profile") or resp_data
-                        if prof and "user_id" in prof:
-                            with self._sync_lock:
-                                self._profiles_cache[user_id] = prof
-                                self._cache_dirty = True
-                            self._update_snapshot()
-                            self._save_local_profiles_cache()
-                            run_on_ui_thread(self._apply_all_to_all_accounts)
-                            bulletins.show_success(
-                                f"✅ Профиль ID {user_id} обновлен!\nЦвет: #{prof.get('name_color')} | Обложка: #{prof.get('profile_color')}"
-                            )
-                            return
+                status, data, err = self._api_request(
+                    "GET",
+                    f"api/profile/{user_id}",
+                    timeout=6.0,
+                    retries=1,
+                    backoff_factor=0.5,
+                )
+                if status == 200 and isinstance(data, dict):
+                    prof = data.get("profile") or data
+                    if prof and "user_id" in prof:
+                        with self._sync_lock:
+                            self._profiles_cache[user_id] = prof
+                            self._cache_dirty = True
+                        self._update_snapshot()
+                        self._save_local_profiles_cache()
+                        run_on_ui_thread(self._apply_all_to_all_accounts)
+                        bulletins.show_success(
+                            f"✅ Профиль ID {user_id} обновлен!\nЦвет: #{prof.get('name_color')} | Обложка: #{prof.get('profile_color')}"
+                        )
+                        return
 
                 bulletins.show_info(f"Профиль ID {user_id} не найден на сервере.")
             except Exception as e:
@@ -3613,6 +3264,13 @@ class Plugin(BasePlugin):
                 subtext="Разблокирует кастомные эмодзи в клавиатуре, премиум-стикеры, реакции и повышенные лимиты",
                 icon="msg_premium",
                 on_change=lambda val: (setattr(self, "_extera_local_premium_enabled", bool(val)), run_on_ui_thread(self._apply_all_to_all_accounts)),
+            ),
+            Switch(
+                key="show_syncprofile_badge_in_about",
+                text="Бейдж в описании («О себе»)",
+                default=True,
+                subtext="Добавлять значок «⚡ Этот пользователь использует SyncProfile» в описание пользователя",
+                icon="msg_info",
             ),
         ]
 
@@ -3749,11 +3407,17 @@ class Plugin(BasePlugin):
         return items
 
     def _clear_cache_action(self, view: Any = None):
+        with self._sync_op_lock:
+            self._sync_in_progress = False
         with self._sync_lock:
             self._profiles_cache.clear()
             self._chats_cache.clear()
             self._cache_dirty = False
             self._patch_cache.clear()
+        self._untracked_uids.clear()
+        self._untracked_cids.clear()
+        self._video_checked_uids.clear()
+        self._video_checked_chat_ids.clear()
         if self._json_cache_file:
             try:
                 self._json_cache_file.wipe()

@@ -6,46 +6,34 @@
 
 ## [v10.3.18] - 2026-08-31
 
-### ⚡ Глобальная оптимизация скролла чатов и списков (120 FPS No-Lag)
-- **Мгновенный Fast-Path для 100% пользователей и чатов (`_sp_v = (cur_ver, uid_or_0)`)**:
-  - Устранено повторное выполнение JNI-рефлексии при каждом вызове `MessagesController.getUser()` и `getChat()`.
-  - Неотслеживаемые пользователи и каналы (99.9% аудитории) теперь также тегируются версией кэша `(cur_ver, 0)`.
-  - При скролле RecyclerView метод `_patch_user_tl_object` и `_patch_chat_tl_object` возвращает результат за **~10 нс** через 3 инструкции Python без единого обращения к JVM/JNI.
-- **Устранение тяжёлых JNI-циклов в хуках Premium**:
-  - `MessagesControllerIsPremiumHook` и `UserObjectIsPremiumHook` оптимизированы: мгновенный возврат при `param.getResult() is True`, прямой поиск в кэше `_own_uids_cache` и lock-free снимке `_profiles_snapshot`.
-  - Устранён опрос `UserConfig.getInstance` по 4 аккаунтам на каждый видимый элемент (экономия до 16 JNI-вызовов на каждую ячейку диалога и сообщения).
-- **Безопасный парсинг сущностей сообщений**:
-  - В `_convert_custom_emojis_to_text_urls` и `_convert_text_urls_to_custom_emojis` добавлена строковая фильтрация типов перед обращением к полям, исключающая скрытые `NoSuchFieldError` в JNI-мосте Chaquopy при наличии обычных стилей текста (Bold, Italic, Spoiler и др.).
-### 🐛 Исправление копирования Emoji Document ID («Сообщение не найдено»)
-- **Восстановлены перехваты меню в `ChatActivity` и `ChatMessageCell`**:
-  - Добавлены легковесные `ChatActivityMenuHook` и `ChatMessageCellMenuHook` для событий открытия контекстного меню (`createMenu`, `showMenuForCell`, `showCustomPostMenu`, `openMenuForCell`, `onItemLongClick`, `createActionsMenu`, `showMenu`). При долгом тапе на сообщение объект мгновенно сохраняется в `_last_selected_message`.
-- **Поддержка отправленных премиум-эмодзи (`TL_messageEntityTextUrl`)**:
-  - В метод `_extract_custom_emoji_ids` добавлено распознавание ссылок `tg://emoji?id=...` и `t.me/emoji/...` в сущностях `TL_messageEntityTextUrl` (в которые преобразуются кастомные эмодзи при отправке без официального Premium), в `AnimatedEmojiSpan`, `URLSpan`, а также по регулярным выражениям во всех текстовых полях сообщения.
-- **Корректный порядок резолва объектов в `_resolve_message_object`**:
-  - `ChatMessageCell.getMessageObject()` теперь вызывается с приоритетом над строковой проверкой `Message`, предотвращая ложное распознавание ячейки как сообщения.
-- **Поддержка передачи `context` в параметрах SDK**:
-  - Добавлена распаковка словаря `context={"message": ...}` и других вариаций аргументов при вызове `on_click`.
+### ⚡ Устранение лагов при открытии карточки профиля (ProfileActivity)
+- **Замена тяжелого обхода View на нативное нижнее всплывающее меню (Bulletin)**:
+  - Полностью удалены функции `_find_profile_info_layout` и `_inject_profile_activity_cell`, которые рекурсивно обходили дерево Android `ViewGroup` через Chaquopy JNI reflection. Это полностью ликвидировало пролагивания и задержки перед открытием карточки профиля (`ProfileActivity`).
+  - При открытии карточки пользователя или канала/чата SyncProfile снизу экрана плавно вылетает стандартная плашка Telegram Bulletin (`⚡ Этот пользователь использует SyncProfile` / `⚡ Этот чат/канал использует SyncProfile`) с 10-секундным кулдауном на один и тот же профиль.
+- **Сохранение неприкосновенности описания («О себе» / bio)**:
+  - Удалена модификация полей `fu.about` и `fc.about` — биография пользователей больше не загрязняется и не перезаписывается служебным текстом.
 
-### 📁 Разблокировка отправки премиум-эмодзи и защита от сброса папок (120 FPS)
-- **Разблокировка выбора и вставки премиум-эмодзи (`MediaDataController` & `AlertsCreator`)**:
-  - Добавлен перехват методов `MediaDataController` (`canUseCustomEmoji`, `isCustomEmojiAvailable`, `canUsePremiumSticker`, `canUseReaction`, `isCustomEmojiAllowed`) с безусловным возвратом `True`.
-  - Добавлен перехват `AlertsCreator.showCustomEmojiPremiumAlert` / `showCustomEmojiAlert`, предотвращающий появление блокирующих диалогов о покупке Telegram Premium. Премиум-эмодзи теперь свободно выбираются из клавиатуры, вставляются в поле ввода и отправляются (автоматически конвертируясь в `tg://emoji?id=...` для сохранения сервером).
-- **Расширенная конфигурация `ExteraConfig`**:
-  - В `_ensure_local_premium` добавлены флаги `sendPremiumEmojis`, `sendCustomEmojis`, `allowCustomEmojis`, `allowPremiumEmojis`, `allowSendPremiumEmoji`, `allowSendCustomEmoji`, `ignorePremiumEmojiAlert`.
-- **Блокировка автосброса в `DialogsActivity` (`DialogsActivitySwitchFolderHook`)**:
-  - Добавлен перехват методов смены папки (`switchToFolder`, `selectFolder`, `showFolder`) в `DialogsActivity`. Если Telegram пытается программно сбросить вкладку на 0 («Все чаты») во время возврата из чата (`_sp_in_resume`), операция отменяется, а выбранная пользователем папка строго сохраняется. Ручное переключение на «Все чаты» по клику на вкладку работает штатно.
-- **Удаление перехватчика `UserConfig.isPremium` (Нативный Java 0ns Fast-Path)**:
-  - Метод `UserConfig.isPremium()` вызывается Telegram и exteraGram сотни раз в секунду при отрисовке каждого элемента интерфейса (сообщения, диалоги, реакции, аватары). Его перехват в Python блокировал UI-поток перегрузкой JNI-вызовов. Теперь премиум обрабатывается нативно через `ExteraConfig.localPremium = True` и флаг `user.premium = true` в Java-памяти за **0 наносекунд** без единого обращения к Python.
-- **Исправление `com.exteragram.messenger.ExteraConfig` в `_ensure_local_premium`**:
-  - Исправлен импорт конфигурации для exteraGram: теперь `ExteraConfig.localPremium = True` гарантированно применяется и сохраняется при старте плагина.
-- **Корректный примитивный `boolean` в хуках `DialogsActivity.checkFilterLocked`**:
-  - `checkFilterLocked()` и `checkFiltersLocked()` теперь возвращают `param.setResult(False)` вместо `None`, исключая сбои JNI unboxing в Chaquopy.
-- **Хук `DialogFilter.isLocked()`**:
-  - `DialogFilter.isLocked()` безусловно возвращает `False` для всех компонентов интерфейса (TabsView, ViewPagerFixed, Adapter).
-- **Ликвидация микростаттеров и оптимизация обработки сообщений (120 FPS No-Lag)**:
-  - Добавлен O(1) in-memory кэш `_EMOJI_DOC_ID_CACHE` для мгновенного парсинга ID кастомных эмодзи без регулярных выражений и срезов строк.
-  - Метод `_patch_message_entities` переведён на O(1) in-memory кольцевой кэш обработанных ID сообщений `_PATCHED_MSG_IDS`, полностью исключая накладные расходы при скролле длинных диалогов.
-  - Устранены тяжелые Python-перехватчики на методы отрисовки, рефлексия `hasattr(ent, "url")` заменена на строковую проверку типа, а неотслеживаемые пользователи отсекаются мгновенно.
+### 🧹 Гарантированная работа «Сбросить кэш и перекачать базу»
+- **Снятие локальной блокировки синхронизации**: принудительный сброс флага `_sync_in_progress = False` при ручном нажатии на сброс кэша, исключая отклонение операции фоновыми таймерами.
+- **Очистка фильтров памяти**: сброс структур `_untracked_uids`, `_untracked_cids`, `_video_checked_uids`, `_video_checked_chat_ids` для мгновенного применения свежей базы профилей к UI без перезапуска приложения.
+- **Универсальный парсер `_parse_items_map`**: полная поддержка любых форматов ответа сервера (`profiles`, `data`, плоские списки, словари).
+
+### 🎨 Корректное отображение значков и паттернов без кастомного цвета
+- **Исправление `_build_peer_color`**: если пользователь установил эмодзи-значок (`bg_emoji_id != 0`, например флаг страны или кастомный премиум-эмодзи), но оставил цвет имени/профиля по умолчанию (`color_id < 0`), плагин больше не отбрасывает объект `TL_peerColor`, а выставляет базовый индекс цвета `color = 0`.
+
+### 🛡️ Устранение вылетов в «Все чаты» и разделение Local Premium
+- **Хуки на все перегрузки методов `MessagesController`**: перехват `getUser(long/Long/int/Integer)`, `getChat`, `getUserFull`, `getChatFull`, `putUser`, `putChat`, `putUsers`, `putChats` с регистрацией по полной сигнатуре типов параметров.
+- **Разделение логики клиентов**:
+  - **AyuGram**: нативный Local Premium управляется исключительно клиентом через `AyuConfig`, плагин не вмешивается в локальные настройки.
+  - **exteraGram**: удалены вызовы несуществующего метода `_sync_local_ayuconfig()`, исключены ошибки `AttributeError` на главном UI-потоке.
+- **Удаление конфликтующих хуков `AlertsCreator`**: предотвращение `NullPointerException` и вылетов при вводе премиум-эмодзи в строке сообщений.
+- **Исправление битовой маски `TLRPC.User`**: исключён ошибочный бит `flags2 |= 1`, повреждавший десериализацию юзернеймов.
+
+### 🚀 Оптимизация производительности ядра (Core Engine)
+- **O(1) проверки типов**: проверки `_is_user` и `_is_chat` переведены на быстрые строковые проверки имени класса, исключая тысячи медленных JNI `hasattr` вызовов при скролле списка диалогов.
+- **Быстрый путь в `_patch_user_tl_object`**: исключен синхронный перебор аккаунтов `_get_my_active_uids()` в hot-path.
+- **Глобальное кэширование `ExteraConfig`**: класс кэшируется в `_EXTERA_CONFIG_CLASS`, а сохранение настроек выполняется только при реальном изменении.
+- **Архитектурная документация**: добавлен файл `BUGS_AND_ARCHITECTURE_GUIDELINES.md` со всеми аспектами, историей багов и инвариантами проекта.
 
 ---
 
