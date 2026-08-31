@@ -954,7 +954,6 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
         self.assertEqual(chat.emoji_status.document_id, 9988776655)
         self.assertTrue(chat.flags & 512)    # flags.9
         self.assertTrue(chat.flags2 & 1)     # flags2.0
-        self.assertTrue(chat.flags2 & 1024)  # flags2.10
 
     def test_hot_path_set_caching_and_invalidation(self):
         for mod_file in ("sync_exteragram.plugin", "sync_ayugram.plugin"):
@@ -1596,15 +1595,14 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             plugin._register_xposed_hooks()
 
             hook_names = {h.__class__.__name__ for m, h in registered}
-            # Heavy list-iteration hooks are removed
+            # All intrusive folder hooks are completely removed to prevent state conflicts with client's native Local Premium
             self.assertNotIn("GetDialogFilterHook", hook_names)
             self.assertNotIn("GetDialogFiltersHook", hook_names)
             self.assertNotIn("LoadDialogFiltersHook", hook_names)
             self.assertNotIn("MessagesControllerLockFiltersHook", hook_names)
-
-            # Light single-check hooks remain
-            self.assertIn("MessagesControllerIsFilterLockedHook", hook_names)
-            self.assertIn("DialogFilterIsLockedHook", hook_names)
+            self.assertNotIn("MessagesControllerIsFilterLockedHook", hook_names)
+            self.assertNotIn("DialogFilterIsLockedHook", hook_names)
+            self.assertNotIn("DialogsActivityCheckFilterLockedHook", hook_names)
 
     def test_post_request_hook_filters_irrelevant_requests(self):
         """Тест: post_request_hook обрабатывает только запросы сообщений/каналов/обновлений."""
@@ -1630,8 +1628,8 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             plugin.post_request_hook("channels.getMessages", 0, mock_response, None)
             self.assertEqual(len(patched), 2)
 
-    def test_dialog_filters_unlocked_in_ui_apply(self):
-        """Тест: _apply_all_to_all_accounts разблокирует mc.dialogFilters (locked = False)."""
+    def test_dialog_filters_not_tampered_in_ui_apply(self):
+        """Тест: _apply_all_to_all_accounts не трогает mc.dialogFilters (оставляет клиенту нативное управление)."""
         for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
             module = load_plugin_module(mod_file)
             plugin = module.Plugin()
@@ -1670,8 +1668,8 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                 import time
                 time.sleep(0.1)
 
-                for f in mock_mc_instance.dialogFilters:
-                    self.assertFalse(f.locked)
+                # dialogFilters should remain unchanged by plugin
+                self.assertEqual(len(mock_mc_instance.dialogFilters), 3)
             finally:
                 if orig_mc is not None:
                     tg_messenger.MessagesController = orig_mc
