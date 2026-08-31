@@ -315,18 +315,6 @@ def _is_ayugram() -> bool:
     except Exception:
         return False
 
-def _get_current_active_user_id() -> int:
-    """Возвращает UID текущего активного пользователя в UI клиента AyuGram."""
-    try:
-        from org.telegram.messenger import UserConfig
-        sel = getattr(UserConfig, "selectedAccount", 0)
-        u_cfg = UserConfig.getInstance(sel)
-        if u_cfg and u_cfg.isClientActivated():
-            return int(u_cfg.getClientUserId() or 0)
-    except Exception:
-        pass
-    return 0
-
 # Кэш TL_peerColor объектов: (color_id, bg_emoji_id) → TL_peerColor.
 # Избегает создание новых Java-объектов на каждый getUser() вызов при прокрутке.
 # TG читает значения int-полей и не модифицирует их — обмен безопасен.
@@ -928,7 +916,7 @@ class Plugin(BasePlugin):
 
     def _ensure_local_premium(self):
         """В AyuGram локальный премиум управляется нативно самим клиентом (AyuConfig).
-        Плагин не вмешивается в AyuConfig, сохраняя пользовательские настройки клиента."""
+        Гарантирует активацию нативного AyuConfig.localPremium для отправки кастомных/премиум эмодзи."""
         global _SHARED_VALID_ATTRS
         # Telegram SharedConfig (нативная поддержка анимации видеоаватаров при необходимости)
         try:
@@ -1258,17 +1246,6 @@ class Plugin(BasePlugin):
                 pass
             return False
 
-        # В AyuGram собственный активный аккаунт управляется нативно клиентом (AyuConfig / Local Premium).
-        # Плагин НЕ модифицирует flags/flags2/premium активного аккаунта,
-        # чтобы нативная отправка премиум-эмодзи и Local Premium работали без малейших сбоев.
-        curr_active_uid = _get_current_active_user_id()
-        if curr_active_uid > 0 and uid == curr_active_uid:
-            try:
-                u._sp_v = (cur_ver, 0)
-            except Exception:
-                pass
-            return False
-
         # 3. O(1) поиск в lock-free снимке CPython dict
         snap = getattr(self, "_profiles_snapshot", None)
         profile = snap.get(uid) if snap else None
@@ -1366,12 +1343,20 @@ class Plugin(BasePlugin):
                 new_flags &= ~0x40000000
 
             # 4. Премиум статус
-            if prem:
-                if not getattr(u, "premium", False):
-                    u.premium = True
-                new_flags |= 0x10000000  # FLAG_PREMIUM (1 << 28 в flags TLRPC.User)
-            else:
-                new_flags &= ~0x10000000
+            # ВАЖНО: для СВОИХ аккаунтов этот флаг не трогаем. Нативный движок AyuGram
+            # (AyuConfig.localPremium) сам решает по РЕАЛЬНОМУ значению user.premium,
+            # нужно ли маскировать кастомные эмодзи под tg://emoji-ссылку перед отправкой.
+            # Если здесь подменить premium=True поверх настоящего не-Premium аккаунта,
+            # AyuGram решит, что Premium настоящий, не применит свою маскировку —
+            # и сервер Telegram срежет кастомный эмодзи прямо при отправке.
+            is_own_account = uid in getattr(self, "_own_uids_cache", ())
+            if not is_own_account:
+                if prem:
+                    if not getattr(u, "premium", False):
+                        u.premium = True
+                    new_flags |= 0x10000000  # FLAG_PREMIUM (1 << 28 в flags TLRPC.User)
+                else:
+                    new_flags &= ~0x10000000
 
             if new_flags != cur_flags:
                 u.flags = new_flags
@@ -1398,15 +1383,6 @@ class Plugin(BasePlugin):
         sp_v = getattr(fu, "_sp_v", None)
         if sp_v is not None and isinstance(sp_v, tuple) and len(sp_v) == 2 and sp_v[0] == cur_ver:
             return bool(sp_v[1])
-
-        # В AyuGram собственный активный аккаунт управляется нативно клиентом
-        curr_active_uid = _get_current_active_user_id()
-        if curr_active_uid > 0 and uid == curr_active_uid:
-            try:
-                fu._sp_v = (cur_ver, 0)
-            except Exception:
-                pass
-            return False
 
         snap = getattr(self, "_profiles_snapshot", None)
         profile = snap.get(uid) if snap else None
