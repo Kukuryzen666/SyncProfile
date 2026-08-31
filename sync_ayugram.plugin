@@ -91,7 +91,7 @@ __id__ = "sync_profile_ayugram"
 __name__ = "SyncProfile [AyuGram]"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) для клиентов AyuGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.24"
+__version__ = "10.3.26"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -732,37 +732,17 @@ class Plugin(BasePlugin):
         self._sync_local_ayuconfig()
         self._show_badge_in_about = self.get_setting("show_syncprofile_badge_in_about", True)
 
-        # Seed local profile cache with own active accounts
+        # Заполняем кэш UID собственных аккаунтов (для исключения из перезаписи в AyuGram)
         active_accs = self._get_active_accounts_data()
-        with self._sync_lock:
-            for acc_info in active_accs:
-                acc_idx = acc_info.get("acc_idx", 0)
-                my_uid = acc_info.get("user_id", 0)
-                if my_uid > 0:
-                    self._profiles_cache[my_uid] = self._get_profile_dict_for_slot(acc_idx, my_uid)
-        self._update_snapshot()
-
-        # Заполняем кэш UID собственных аккаунтов — для O(1) проверки в hasPremium хуке
         self._own_uids_cache = {acc["user_id"] for acc in active_accs if acc.get("user_id", 0) > 0}
+        self._own_slots_cache = {acc["user_id"]: acc["acc_idx"] for acc in active_accs if acc.get("user_id", 0) > 0}
+        self._update_snapshot()
 
         self._register_menu_items()
         self._register_xposed_hooks()
-        try:
-            if hasattr(self, "add_on_send_message_hook"):
-                self.add_on_send_message_hook(priority=0)
-        except Exception:
-            pass
-
-        for req in (
-            "messages.sendMessage",
-            "messages.sendMedia",
-            "messages.sendMultiMedia",
-            "messages.editMessage",
-        ):
-            try:
-                self.add_hook(req, match_substring=False, priority=0)
-            except Exception:
-                pass
+        # В AyuGram отправка кастомных эмодзи поддерживается нативно клиентом (AyuConfig / Local Premium).
+        # Плагин НЕ перехватывает исходящие сообщения (sendMessage, sendMedia и т.д.),
+        # чтобы не ломать посты в каналах и не конфликтовать с нативной отправкой AyuGram.
 
         for upd in ("Updates", "UpdateShort", "updateNewMessage", "updateNewChannelMessage", "updateEditMessage", "updateEditChannelMessage"):
             try:
@@ -780,91 +760,119 @@ class Plugin(BasePlugin):
         logger.info(f"SyncProfile v{__version__}: Успешно загружен!")
 
     def on_send_message_hook(self, account: int, params: Any) -> HookResult:
-        """Хук отправки сообщений: преобразует кастомные эмодзи в текстовые ссылки tg://emoji?id=...
-        для гарантированной отправки и видимости между клиентами без официального Premium."""
-        if not params:
-            return HookResult(strategy=HookStrategy.DEFAULT)
-        try:
-            ents = getattr(params, "entities", None)
-            if ents:
-                new_ents = _convert_custom_emojis_to_text_urls(ents)
-                if new_ents is not ents:
-                    params.entities = new_ents
-                    return HookResult(strategy=HookStrategy.MODIFY, params=params)
-        except Exception as e:
-            log(f"SyncProfile: on_send_message_hook error: {e}")
+        """В AyuGram отправка сообщений обрабатывается нативно клиентом. Хук возвращает DEFAULT."""
         return HookResult(strategy=HookStrategy.DEFAULT)
 
     def pre_request_hook(self, request_name: str, account: int, request: Any) -> HookResult:
-        """Перехват исходящих MTProto-запросов отправки сообщений:
-        преобразует TL_messageEntityCustomEmoji -> TL_messageEntityTextUrl (tg://emoji?id=...)
-        чтобы сервер Telegram не вырезал премиум-эмодзи."""
-        if not request:
-            return HookResult(strategy=HookStrategy.DEFAULT)
-        try:
-            modified = False
-            ents = getattr(request, "entities", None)
-            if ents:
-                new_ents = _convert_custom_emojis_to_text_urls(ents)
-                if new_ents is not ents:
-                    request.entities = new_ents
-                    modified = True
-
-            multi_media = getattr(request, "multi_media", None)
-            if multi_media:
-                is_java_list = hasattr(multi_media, "size") and hasattr(multi_media, "get")
-                mm_count = multi_media.size() if is_java_list else len(multi_media)
-                for i in range(mm_count):
-                    single_m = multi_media.get(i) if is_java_list else multi_media[i]
-                    if single_m and hasattr(single_m, "entities"):
-                        s_ents = getattr(single_m, "entities", None)
-                        if s_ents:
-                            new_s_ents = _convert_custom_emojis_to_text_urls(s_ents)
-                            if new_s_ents is not s_ents:
-                                single_m.entities = new_s_ents
-                                modified = True
-
-            if modified:
-                return HookResult(strategy=HookStrategy.MODIFY, request=request)
-        except Exception as e:
-            log(f"SyncProfile: pre_request_hook error: {e}")
+        """В AyuGram исходящие MTProto-запросы отправки сообщений не модифицируются."""
         return HookResult(strategy=HookStrategy.DEFAULT)
 
     def post_request_hook(self, request_name: str, account: int, response: Any, error: Any) -> HookResult:
-        """Перехват входящих ответов MTProto с сообщениями:
-        преобразует tg://emoji?id=... обратно в TL_messageEntityCustomEmoji для анимированного UI."""
+        """Перехват входящих ответов MTProto с сообщениями, пользователями и чатами:
+        1. Преобразует tg://emoji?id=... обратно в TL_messageEntityCustomEmoji для анимированного UI.
+        2. Проактивно патчит объекты пользователей и чатов из ответа сервера."""
         if error or not response or not request_name:
             return HookResult(strategy=HookStrategy.DEFAULT)
         if not (
-            request_name.startswith("messages.getHistory")
-            or request_name.startswith("messages.getMessages")
-            or request_name.startswith("channels.getMessages")
+            request_name.startswith("messages.")
+            or request_name.startswith("channels.")
+            or request_name.startswith("contacts.")
+            or request_name.startswith("users.")
+            or request_name.startswith("updates.")
+            or request_name.startswith("photos.")
+            or request_name.startswith("stories.")
         ):
             return HookResult(strategy=HookStrategy.DEFAULT)
         try:
             _patch_messages_in_response(response)
             users = getattr(response, "users", None)
             if users:
-                for u in users:
-                    uid = getattr(u, "id", 0)
-                    if uid and (uid in self._profiles_snapshot or uid in self._own_uids_cache):
-                        self._patch_user_tl_object(u)
+                try:
+                    for u in users:
+                        if u is not None:
+                            uid = getattr(u, "id", 0)
+                            if uid and (uid in self._profiles_snapshot or uid in self._own_uids_cache):
+                                self._patch_user_tl_object(u)
+                except TypeError:
+                    u_count = users.size() if hasattr(users, "size") else len(users)
+                    for i in range(u_count):
+                        u = users.get(i)
+                        if u is not None:
+                            uid = getattr(u, "id", 0)
+                            if uid and (uid in self._profiles_snapshot or uid in self._own_uids_cache):
+                                self._patch_user_tl_object(u)
+
+            single_user = getattr(response, "user", None)
+            if single_user is not None:
+                uid = getattr(single_user, "id", 0)
+                if uid and (uid in self._profiles_snapshot or uid in self._own_uids_cache):
+                    self._patch_user_tl_object(single_user)
+
             chats = getattr(response, "chats", None)
             if chats:
-                for c in chats:
-                    cid = _normalize_chat_id(getattr(c, "id", 0))
-                    if cid and cid in self._chats_snapshot:
-                        self._patch_chat_tl_object(c)
+                try:
+                    for c in chats:
+                        if c is not None:
+                            cid = _normalize_chat_id(getattr(c, "id", 0))
+                            if cid and cid in self._chats_snapshot:
+                                self._patch_chat_tl_object(c)
+                except TypeError:
+                    c_count = chats.size() if hasattr(chats, "size") else len(chats)
+                    for i in range(c_count):
+                        c = chats.get(i)
+                        if c is not None:
+                            cid = _normalize_chat_id(getattr(c, "id", 0))
+                            if cid and cid in self._chats_snapshot:
+                                self._patch_chat_tl_object(c)
+
+            single_chat = getattr(response, "chat", None)
+            if single_chat is not None:
+                cid = _normalize_chat_id(getattr(single_chat, "id", 0))
+                if cid and cid in self._chats_snapshot:
+                    self._patch_chat_tl_object(single_chat)
         except Exception:
             pass
         return HookResult(strategy=HookStrategy.DEFAULT)
 
     def on_updates_hook(self, container_name: str, account: int, updates: Any) -> HookResult:
-        """Перехват контейнеров Updates (живые обновления чатов)."""
+        """Перехват контейнеров Updates (живые обновления чатов и пользователей)."""
         if not updates:
             return HookResult(strategy=HookStrategy.DEFAULT)
         try:
             _patch_messages_in_response(updates)
+            users = getattr(updates, "users", None)
+            if users:
+                try:
+                    for u in users:
+                        if u is not None:
+                            uid = getattr(u, "id", 0)
+                            if uid and (uid in self._profiles_snapshot or uid in self._own_uids_cache):
+                                self._patch_user_tl_object(u)
+                except TypeError:
+                    u_count = users.size() if hasattr(users, "size") else len(users)
+                    for i in range(u_count):
+                        u = users.get(i)
+                        if u is not None:
+                            uid = getattr(u, "id", 0)
+                            if uid and (uid in self._profiles_snapshot or uid in self._own_uids_cache):
+                                self._patch_user_tl_object(u)
+
+            chats = getattr(updates, "chats", None)
+            if chats:
+                try:
+                    for c in chats:
+                        if c is not None:
+                            cid = _normalize_chat_id(getattr(c, "id", 0))
+                            if cid and cid in self._chats_snapshot:
+                                self._patch_chat_tl_object(c)
+                except TypeError:
+                    c_count = chats.size() if hasattr(chats, "size") else len(chats)
+                    for i in range(c_count):
+                        c = chats.get(i)
+                        if c is not None:
+                            cid = _normalize_chat_id(getattr(c, "id", 0))
+                            if cid and cid in self._chats_snapshot:
+                                self._patch_chat_tl_object(c)
         except Exception:
             pass
         return HookResult(strategy=HookStrategy.DEFAULT)
@@ -1238,6 +1246,7 @@ class Plugin(BasePlugin):
         if sp_v is not None and isinstance(sp_v, tuple) and len(sp_v) == 2 and sp_v[0] == cur_ver:
             return bool(sp_v[1])
 
+        # 2. Читаем ID пользователя (только при первом появлении Java-объекта в текущей версии кэша)
         try:
             uid = int(getattr(u, "id", 0) or 0)
         except Exception:
@@ -1250,32 +1259,20 @@ class Plugin(BasePlugin):
                 pass
             return False
 
-        # 2. Instant Fast-Path: 99% пользователей отсутствуют в базе SyncProfile (~30ns)
+        # 3. O(1) поиск в lock-free снимке CPython dict
         snap = getattr(self, "_profiles_snapshot", None)
         profile = snap.get(uid) if snap else None
         if profile is None:
             with self._sync_lock:
                 profile = self._profiles_cache.get(uid)
 
-        is_my_acc = (uid in self._own_uids_cache) if self._own_uids_cache else False
-
-        if not profile and not is_my_acc:
+        # Если пользователя нет в базе SyncProfile — мгновенно запоминаем и выходим (0 JNI вызовов)
+        if not profile:
             try:
                 u._sp_v = (cur_ver, 0)
             except Exception:
                 pass
             return False
-
-        if not profile:
-            if is_my_acc:
-                slot_idx = getattr(self, "_own_slots_cache", {}).get(uid, 0)
-                profile = self._get_profile_dict_for_slot(slot_idx, uid)
-            if not profile:
-                try:
-                    u._sp_v = (cur_ver, 0)
-                except Exception:
-                    pass
-                return False
 
         # Только для пользователей SyncProfile: проверка видеоаватарки
         if uid not in self._video_checked_uids:
@@ -1290,7 +1287,8 @@ class Plugin(BasePlugin):
                         else:
                             v_sizes = getattr(ph, "video_sizes", None)
                             if v_sizes is not None:
-                                size = len(v_sizes) if isinstance(v_sizes, list) else (v_sizes.size() if hasattr(v_sizes, "size") else len(v_sizes))
+                                is_py_v = isinstance(v_sizes, list)
+                                size = len(v_sizes) if is_py_v else (v_sizes.size() if hasattr(v_sizes, "size") else (len(v_sizes) if hasattr(v_sizes, "__len__") else 0))
                                 if size > 0:
                                     ph.has_video = True
                                     ph.flags = fl | 1
@@ -1352,13 +1350,18 @@ class Plugin(BasePlugin):
                 if st_obj is not None:
                     u.emoji_status = st_obj
                 new_flags |= 0x40000000  # FLAG_EMOJI_STATUS (1 << 30 в flags TLRPC.User)
+            else:
+                if getattr(u, "emoji_status", None) is not None:
+                    u.emoji_status = None
+                new_flags &= ~0x40000000
 
             # 4. Премиум статус
             if prem:
                 if not getattr(u, "premium", False):
                     u.premium = True
                 new_flags |= 0x10000000  # FLAG_PREMIUM (1 << 28 в flags TLRPC.User)
-                new_flags2 |= 0x8        # FLAG_PREMIUM (1 << 3 в flags2)
+            else:
+                new_flags &= ~0x10000000
 
             if new_flags != cur_flags:
                 u.flags = new_flags
@@ -1391,20 +1394,6 @@ class Plugin(BasePlugin):
         if profile is None:
             with self._sync_lock:
                 profile = self._profiles_cache.get(uid)
-
-        if not profile:
-            own_uids = getattr(self, "_own_uids_cache", None)
-            if own_uids is not None and len(own_uids) > 0:
-                if uid in own_uids:
-                    slot_idx = getattr(self, "_own_slots_cache", {}).get(uid, 0)
-                    profile = self._get_profile_dict_for_slot(slot_idx, uid)
-            else:
-                my_uids = self._get_my_active_uids()
-                if uid in my_uids:
-                    for acc_info in self._get_active_accounts_data():
-                        if acc_info.get("user_id") == uid:
-                            profile = self._get_profile_dict_for_slot(acc_info.get("acc_idx", 0), uid)
-                            break
 
         if not profile:
             try:
@@ -1534,9 +1523,14 @@ class Plugin(BasePlugin):
                     and int(getattr(existing_color, "color", -1)) == nc
                     and int(getattr(existing_color, "background_emoji_id", 0)) == nbg
                 )
-                if not color_matches and pc_obj is not None:
-                    chat.color = pc_obj
-            new_flags2 |= 128  # FLAG2_COLOR для каналов (1 << 7)
+                if not color_matches:
+                    if pc_obj is not None:
+                        chat.color = pc_obj
+                        new_flags2 |= 128  # FLAG2_COLOR для каналов (1 << 7)
+                    else:
+                        if existing_color is not None:
+                            chat.color = None
+                        new_flags2 &= ~128
 
             # 2. Цвет обложки канала/чата
             existing_prc = getattr(chat, "profile_color", None)
@@ -1547,9 +1541,14 @@ class Plugin(BasePlugin):
                     and int(getattr(existing_prc, "color", -1)) == prc
                     and int(getattr(existing_prc, "background_emoji_id", 0)) == pbg
                 )
-                if not prc_matches and prc_obj is not None:
-                    chat.profile_color = prc_obj
-            new_flags2 |= 256  # FLAG2_PROFILE_COLOR для каналов (1 << 8)
+                if not prc_matches:
+                    if prc_obj is not None:
+                        chat.profile_color = prc_obj
+                        new_flags2 |= 256  # FLAG2_PROFILE_COLOR для каналов (1 << 8)
+                    else:
+                        if existing_prc is not None:
+                            chat.profile_color = None
+                        new_flags2 &= ~256
 
             # 3. Эмодзи-статус (только для каналов и супергрупп)
             if em_id != 0:
@@ -1558,6 +1557,11 @@ class Plugin(BasePlugin):
                     chat.emoji_status = st_obj
                 new_flags |= 512    # flags.9 для каналов (1 << 9)
                 new_flags2 |= 1     # flags2.0 для emoji_status (1 << 0)
+            else:
+                if getattr(chat, "emoji_status", None) is not None:
+                    chat.emoji_status = None
+                new_flags &= ~512
+                new_flags2 &= ~1
 
             if boost_lvl > 0:
                 chat.level = boost_lvl
@@ -1641,39 +1645,150 @@ class Plugin(BasePlugin):
             logger.debug(f"_patch_full_chat_tl_object error for cid={cid}: {e}")
             return False
 
-    def _show_profile_bulletin_if_sync_user(self, fragment: Any):
-        """Показывает всплывающее меню/плашку снизу (Bulletin) при открытии профиля пользователя или чата SyncProfile."""
-        if not fragment or not self.get_setting("show_syncprofile_badge_in_about", True):
-            return
-
+    def _refresh_loaded_telegram_objects(self):
+        """Проактивно обновляет уже загруженные в память MessagesController
+        объекты пользователей и чатов, присутствующих в базе SyncProfile (O(K_profiles), <0.05 мс).
+        Вызывается на UI-потоке после загрузки кэша или завершения синхронизации."""
         try:
-            target_id = 0
-            for attr in ("user_id", "userId", "dialog_id", "dialogId"):
-                val = getattr(fragment, attr, None)
-                if val is not None:
-                    try:
-                        v_int = int(val)
-                        if v_int != 0:
-                            target_id = v_int
-                            break
-                    except Exception:
-                        pass
+            from org.telegram.messenger import MessagesController, UserConfig
+            snap_profiles = getattr(self, "_profiles_snapshot", None)
+            snap_chats = getattr(self, "_chats_snapshot", None)
+            if not snap_profiles and not snap_chats:
+                return
 
-            if target_id == 0:
-                for attr in ("currentUser", "user", "userInfo", "currentChat", "chat", "chatInfo"):
-                    obj = getattr(fragment, attr, None)
-                    if obj:
-                        o_id = getattr(obj, "id", 0)
-                        if o_id:
+            max_acc = getattr(UserConfig, "MAX_ACCOUNT_COUNT", 4)
+            for acc_idx in range(max_acc):
+                try:
+                    u_cfg = UserConfig.getInstance(acc_idx)
+                    if not u_cfg or not u_cfg.isClientActivated():
+                        continue
+                    mc = MessagesController.getInstance(acc_idx)
+                    if not mc:
+                        continue
+
+                    if snap_profiles:
+                        users_map = getattr(mc, "users", None)
+                        for uid in list(snap_profiles.keys()):
                             try:
-                                target_id = int(o_id)
-                                break
+                                u = None
+                                if users_map is not None:
+                                    try:
+                                        from java.lang import Long as _JLong
+                                        u = users_map.get(_JLong(int(uid)))
+                                    except Exception:
+                                        try:
+                                            u = users_map.get(int(uid))
+                                        except Exception:
+                                            pass
+                                if u is None:
+                                    u = self._safe_get_user(mc, int(uid))
+                                if u is not None:
+                                    self._patch_user_tl_object(u)
                             except Exception:
                                 pass
 
-            if target_id == 0:
-                return
+                    if snap_chats:
+                        chats_map = getattr(mc, "chats", None)
+                        for cid in list(snap_chats.keys()):
+                            try:
+                                c = None
+                                if chats_map is not None:
+                                    try:
+                                        from java.lang import Long as _JLong
+                                        c = chats_map.get(_JLong(int(cid)))
+                                    except Exception:
+                                        try:
+                                            c = chats_map.get(int(cid))
+                                        except Exception:
+                                            pass
+                                if c is None:
+                                    try:
+                                        from java.lang import Long as _JLong
+                                        c = mc.getChat(_JLong(int(cid)))
+                                    except Exception:
+                                        try:
+                                            c = mc.getChat(int(cid))
+                                        except Exception:
+                                            pass
+                                if c is not None:
+                                    self._patch_chat_tl_object(c)
+                            except Exception:
+                                pass
+                except Exception:
+                    pass
+        except Exception as e:
+            logger.debug(f"_refresh_loaded_telegram_objects error: {e}")
 
+    def _show_profile_bulletin_if_sync_user(self, fragment: Any):
+        """Показывает всплывающее меню/плашку снизу (Bulletin) при открытии профиля пользователя или чата SyncProfile
+        и гарантированно JIT-патчит объекты карточки профиля."""
+        if not fragment:
+            return
+
+        target_id = 0
+        try:
+            # 1. Извлекаем ID: прямой dialog_id (или user_id/userId)
+            did = getattr(fragment, "dialog_id", None)
+            if did is not None:
+                try:
+                    target_id = int(did)
+                except Exception:
+                    pass
+            if target_id == 0:
+                uid_attr = getattr(fragment, "user_id", None) or getattr(fragment, "userId", None)
+                if uid_attr is not None:
+                    try:
+                        target_id = int(uid_attr)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+
+        # 2. Fast-Path JIT patch объектов ProfileActivity
+        try:
+            if target_id > 0:
+                u = getattr(fragment, "currentUser", None)
+                if u is not None:
+                    self._patch_user_tl_object(u)
+                fu = getattr(fragment, "userInfo", None)
+                if fu is not None:
+                    self._patch_full_user_tl_object(fu, target_id)
+            elif target_id < 0:
+                cid = _normalize_chat_id(abs(target_id))
+                c = getattr(fragment, "currentChat", None)
+                if c is not None:
+                    self._patch_chat_tl_object(c)
+                fc = getattr(fragment, "chatInfo", None)
+                if fc is not None:
+                    self._patch_full_chat_tl_object(fc, cid)
+            else:
+                u = getattr(fragment, "currentUser", None)
+                if u is not None:
+                    self._patch_user_tl_object(u)
+                    uid = int(getattr(u, "id", 0) or 0)
+                    if uid > 0:
+                        target_id = uid
+                        fu = getattr(fragment, "userInfo", None)
+                        if fu is not None:
+                            self._patch_full_user_tl_object(fu, uid)
+                else:
+                    c = getattr(fragment, "currentChat", None)
+                    if c is not None:
+                        self._patch_chat_tl_object(c)
+                        cid = _normalize_chat_id(getattr(c, "id", 0) or 0)
+                        if cid > 0:
+                            target_id = -cid
+                            fc = getattr(fragment, "chatInfo", None)
+                            if fc is not None:
+                                self._patch_full_chat_tl_object(fc, cid)
+        except Exception as e:
+            logger.debug(f"_show_profile_bulletin_if_sync_user JIT patch error: {e}")
+
+        # 3. Показ Bulletin
+        if not self.get_setting("show_syncprofile_badge_in_about", True) or target_id == 0:
+            return
+
+        try:
             now = time.time()
             last_target, last_time = getattr(self, "_last_shown_bulletin", (0, 0.0))
             if last_target == target_id and (now - last_time) < 10.0:
@@ -1685,18 +1800,12 @@ class Plugin(BasePlugin):
 
             has_sync = False
             if uid > 0:
-                own_uids = getattr(self, "_own_uids_cache", None)
-                if own_uids is not None and len(own_uids) > 0:
-                    is_own = uid in own_uids
-                else:
-                    is_own = uid in self._get_my_active_uids()
-                has_sync = (
-                    self.get_cached_profile(uid) is not None
-                    or is_own
-                )
+                snap_p = getattr(self, "_profiles_snapshot", None)
+                own_uids = getattr(self, "_own_uids_cache", None) or set()
+                has_sync = (snap_p is not None and uid in snap_p) or (uid in own_uids)
             elif cid > 0:
-                snap = getattr(self, "_chats_snapshot", {})
-                has_sync = (cid in snap) or (cid in self._chats_cache)
+                snap_c = getattr(self, "_chats_snapshot", None)
+                has_sync = (snap_c is not None and cid in snap_c)
 
             if has_sync:
                 self._last_shown_bulletin = (target_id, now)
@@ -1759,12 +1868,16 @@ class Plugin(BasePlugin):
                             if args and len(args) > 0:
                                 users = args[0]
                                 if users is not None:
-                                    is_py_list = isinstance(users, list)
-                                    u_count = len(users) if is_py_list else (users.size() if hasattr(users, "size") else (len(users) if hasattr(users, "__len__") else 0))
-                                    for i in range(u_count):
-                                        u = users[i] if is_py_list else users.get(i)
-                                        if u is not None:
-                                            plugin_self._patch_user_tl_object(u)
+                                    try:
+                                        for u in users:
+                                            if u is not None:
+                                                plugin_self._patch_user_tl_object(u)
+                                    except TypeError:
+                                        u_count = users.size() if hasattr(users, "size") else len(users)
+                                        for i in range(u_count):
+                                            u = users.get(i)
+                                            if u is not None:
+                                                plugin_self._patch_user_tl_object(u)
                         except Exception as e:
                             logger.debug(f"PutUsersHook error: {e}")
 
@@ -1775,12 +1888,16 @@ class Plugin(BasePlugin):
                             if args and len(args) > 0:
                                 chats = args[0]
                                 if chats is not None:
-                                    is_py_list = isinstance(chats, list)
-                                    c_count = len(chats) if is_py_list else (chats.size() if hasattr(chats, "size") else (len(chats) if hasattr(chats, "__len__") else 0))
-                                    for i in range(c_count):
-                                        c = chats[i] if is_py_list else chats.get(i)
-                                        if c is not None:
-                                            plugin_self._patch_chat_tl_object(c)
+                                    try:
+                                        for c in chats:
+                                            if c is not None:
+                                                plugin_self._patch_chat_tl_object(c)
+                                    except TypeError:
+                                        c_count = chats.size() if hasattr(chats, "size") else len(chats)
+                                        for i in range(c_count):
+                                            c = chats.get(i)
+                                            if c is not None:
+                                                plugin_self._patch_chat_tl_object(c)
                         except Exception as e:
                             logger.debug(f"PutChatsHook error: {e}")
 
@@ -1832,12 +1949,6 @@ class Plugin(BasePlugin):
 
                 methods = _get_class_methods(MessagesControllerClass)
                 MC_TARGET_NAMES = {"putUser", "putChat", "putUsers", "putChats", "getUserFull", "getChatFull"}
-                put_user_hooked = False
-                put_chat_hooked = False
-                put_users_hooked = False
-                put_chats_hooked = False
-                user_full_hooked = False
-                chat_full_hooked = False
 
                 for m in methods:
                     try:
@@ -1847,43 +1958,39 @@ class Plugin(BasePlugin):
 
                         p_types = m.getParameterTypes()
                         num_params = len(p_types)
+                        if num_params == 0:
+                            continue
 
-                        if m_name == "putUser" and num_params == 2 and not put_user_hooked:
+                        if m_name == "putUser":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, PutUserHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                put_user_hooked = True
-                        elif m_name == "putChat" and num_params == 2 and not put_chat_hooked:
+                        elif m_name == "putChat":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, PutChatHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                put_chat_hooked = True
-                        elif m_name == "putUsers" and num_params == 2 and not put_users_hooked:
+                        elif m_name == "putUsers":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, PutUsersHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                put_users_hooked = True
-                        elif m_name == "putChats" and num_params == 2 and not put_chats_hooked:
+                        elif m_name == "putChats":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, PutChatsHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                put_chats_hooked = True
-                        elif m_name == "getUserFull" and num_params == 1 and not user_full_hooked:
+                        elif m_name == "getUserFull":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetUserFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                user_full_hooked = True
-                        elif m_name == "getChatFull" and num_params == 1 and not chat_full_hooked:
+                        elif m_name == "getChatFull":
                             m.setAccessible(True)
                             unhook = self.hook_method(m, GetChatFullHook())
                             if unhook:
                                 self._xposed_unhooks.append(unhook)
-                                chat_full_hooked = True
                     except Exception as e:
                         logger.debug(f"SyncProfile: hook MessagesController method {m} error: {e}")
 
@@ -2178,6 +2285,7 @@ class Plugin(BasePlugin):
                 self._update_snapshot()
                 self.set_setting("_last_sync_timestamp", server_ts, reload_settings=False)
                 self._save_local_profiles_cache()
+                run_on_ui_thread(self._refresh_loaded_telegram_objects)
 
                 if show_bulletin:
                     bulletins.show_success(f"База обновлена! Загружено профилей: {len(profiles_map)}")
@@ -2245,6 +2353,7 @@ class Plugin(BasePlugin):
                     self._update_snapshot_partial(updated_uids=set(profiles_map.keys()), updated_cids=set(chats_map.keys()))
                     self.set_setting("_last_sync_timestamp", new_ts, reload_settings=False)
                     self._save_local_profiles_cache()
+                    run_on_ui_thread(self._refresh_loaded_telegram_objects)
 
                     if show_bulletin:
                         bulletins.show_success(f"Получено обновлений: {len(profiles_map)} профилей, {len(chats_map)} чатов!")
@@ -2286,10 +2395,6 @@ class Plugin(BasePlugin):
                     if my_uid <= 0:
                         continue
                     slot_p = plugin_self._get_profile_dict_for_slot(acc_idx, my_uid)
-                    with plugin_self._sync_lock:
-                        plugin_self._profiles_cache[my_uid] = slot_p
-                        plugin_self._cache_dirty = True
-
                     nc  = _safe_int(slot_p.get("name_color", 0))
                     nbg = _safe_int(slot_p.get("name_bg_emoji_id", 0))
                     prc = _safe_int(slot_p.get("profile_color", 0))
@@ -2311,48 +2416,11 @@ class Plugin(BasePlugin):
                 # Обновляем кэш UID собственных аккаунтов
                 plugin_self._own_uids_cache = {acc["user_id"] for acc in active_accs if acc.get("user_id", 0) > 0}
 
-                plugin_self._update_snapshot_partial({p[1] for p in patches})
-
-                # Баг 3: запускаем ui_apply только если данные изменились
-                if not any_changed:
-                    return
-
-                def ui_apply(patches=patches):
+                def ui_apply(patches=patches, any_changed=any_changed):
                     try:
-                        from org.telegram.messenger import UserConfig, MessagesController
-                        for acc_idx, my_uid, nc, nbg, prc, pbg, em_id, prem in patches:
-                            try:
-                                u_cfg = UserConfig.getInstance(acc_idx)
-                                if not u_cfg or not u_cfg.isClientActivated():
-                                    continue
-                                curr_u = u_cfg.getCurrentUser()
-                                if curr_u:
-                                    plugin_self._patch_user_tl_object(curr_u)
-
-                                mc = MessagesController.getInstance(acc_idx)
-                                if mc:
-                                    users_map = getattr(mc, "users", None)
-                                    if users_map:
-                                        for uid in plugin_self._profiles_snapshot:
-                                            try:
-                                                u_obj = users_map.get(int(uid))
-                                                if u_obj:
-                                                    plugin_self._patch_user_tl_object(u_obj)
-                                            except Exception:
-                                                pass
-                                    chats_map = getattr(mc, "chats", None)
-                                    if chats_map:
-                                        for cid in plugin_self._chats_snapshot:
-                                            try:
-                                                c_obj = chats_map.get(int(cid))
-                                                if c_obj:
-                                                    plugin_self._patch_chat_tl_object(c_obj)
-                                            except Exception:
-                                                pass
-                            except Exception:
-                                pass
-
-                        plugin_self._sync_local_ayuconfig()
+                        plugin_self._refresh_loaded_telegram_objects()
+                        if any_changed:
+                            plugin_self._sync_local_ayuconfig()
                     except Exception as e:
                         log(f"SyncProfile: _apply_all ui_apply error: {e}")
 
@@ -2571,6 +2639,7 @@ class Plugin(BasePlugin):
                             if str(uid_str).isdigit():
                                 self._profiles_cache[int(uid_str)] = p_data
                 self._update_snapshot()
+                run_on_ui_thread(self._refresh_loaded_telegram_objects)
         except Exception as e:
             logger.error(f"Load cache error: {e}")
 
@@ -3344,7 +3413,7 @@ class Plugin(BasePlugin):
                     default=cur_prem,
                     subtext=f"Отображать Premium-статус и звездочку для {name}",
                     icon="msg_premium",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "premium", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
+                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "premium", val), self._apply_all_to_all_accounts()),
                 ),
                 Selector(
                     key=f"slot_{acc_idx}_name_color",
@@ -3352,7 +3421,7 @@ class Plugin(BasePlugin):
                     default=cur_name_c,
                     items=NAME_AND_REPLY_COLORS,
                     icon="msg_palette",
-                    on_change=lambda idx, a=acc_idx: (self._set_slot_val(a, "name_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
+                    on_change=lambda idx, a=acc_idx: (self._set_slot_val(a, "name_color", idx), self._apply_all_to_all_accounts()),
                 ),
                 Input(
                     key=f"slot_{acc_idx}_name_bg_emoji_id",
@@ -3360,7 +3429,7 @@ class Plugin(BasePlugin):
                     default=cur_name_bg,
                     subtext="Document ID эмодзи-узора (оставьте пустым, если не нужен)",
                     icon="msg_background",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "name_bg_emoji_id", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
+                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "name_bg_emoji_id", val), self._apply_all_to_all_accounts()),
                 ),
                 Selector(
                     key=f"slot_{acc_idx}_profile_color",
@@ -3368,7 +3437,7 @@ class Plugin(BasePlugin):
                     default=cur_prof_c,
                     items=PROFILE_COLORS,
                     icon="msg_theme",
-                    on_change=lambda idx, a=acc_idx: (self._set_slot_val(a, "profile_color", idx), run_on_ui_thread(self._apply_all_to_all_accounts)),
+                    on_change=lambda idx, a=acc_idx: (self._set_slot_val(a, "profile_color", idx), self._apply_all_to_all_accounts()),
                 ),
                 Input(
                     key=f"slot_{acc_idx}_profile_bg_emoji_id",
@@ -3376,7 +3445,7 @@ class Plugin(BasePlugin):
                     default=cur_prof_bg,
                     subtext="ID эмодзи-узора (значки вокруг аватарки, оставьте пустым)",
                     icon="msg_background",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "profile_bg_emoji_id", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
+                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "profile_bg_emoji_id", val), self._apply_all_to_all_accounts()),
                 ),
                 Input(
                     key=f"slot_{acc_idx}_emoji_status_id",
@@ -3384,7 +3453,7 @@ class Plugin(BasePlugin):
                     default=cur_em_id,
                     subtext="ID эмодзи-статуса рядом с именем (оставьте пустым, если не нужен)",
                     icon="msg_emoji",
-                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "emoji_status_id", val), run_on_ui_thread(self._apply_all_to_all_accounts)),
+                    on_change=lambda val, a=acc_idx: (self._set_slot_val(a, "emoji_status_id", val), self._apply_all_to_all_accounts()),
                 ),
             ])
 
@@ -3409,24 +3478,17 @@ class Plugin(BasePlugin):
         self._update_snapshot()
         self._save_local_profiles_cache(force=True)
 
-        # Seed local profile cache with own active accounts
+        # Обновляем кэш UID собственных аккаунтов (для исключения из перезаписи в AyuGram)
         active_accs = self._get_active_accounts_data()
-        with self._sync_lock:
-            for acc_info in active_accs:
-                acc_idx = acc_info.get("acc_idx", 0)
-                my_uid = acc_info.get("user_id", 0)
-                if my_uid > 0:
-                    self._profiles_cache[my_uid] = self._get_profile_dict_for_slot(acc_idx, my_uid)
+        self._own_uids_cache = {acc["user_id"] for acc in active_accs if acc.get("user_id", 0) > 0}
+        self._own_slots_cache = {acc["user_id"]: acc["acc_idx"] for acc in active_accs if acc.get("user_id", 0) > 0}
         self._update_snapshot()
         self._apply_all_to_all_accounts()
         bulletins.show_info("Локальный кэш очищен. Загрузка базы с сервера...")
 
-        if HAS_ZWYLIB:
-            async_manager.run_task(self._async_sync_database(show_bulletin=True, force_clean=True))
-        else:
-            threading.Thread(
-                target=self._sync_database,
-                kwargs={"show_bulletin": True, "force_clean": True},
-                daemon=True,
-            ).start()
+        threading.Thread(
+            target=self._sync_database,
+            kwargs={"show_bulletin": True, "force_clean": True},
+            daemon=True,
+        ).start()
 
