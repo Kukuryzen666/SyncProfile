@@ -91,7 +91,7 @@ __id__ = "sync_profile_ayugram"
 __name__ = "SyncProfile [AyuGram]"
 __description__ = "Синхронизация кастомного профиля (цвета имени и реплаев, обложки, премиум эмодзи-статусы и фоновые узоры) для клиентов AyuGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.23"
+__version__ = "10.3.24"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -427,23 +427,63 @@ def _extract_emoji_doc_id_from_url(url: str) -> Optional[int]:
         pass
     return None
 
+def _get_entity_doc_id(ent: Any) -> int:
+    """Извлекает document_id из TL_messageEntityCustomEmoji или TL_inputMessageEntityCustomEmoji."""
+    if ent is None:
+        return 0
+    # 1. Direct document_id attribute (TL_messageEntityCustomEmoji)
+    doc_id = getattr(ent, "document_id", None)
+    if doc_id is not None:
+        try:
+            val = int(doc_id)
+            if val != 0:
+                return val
+        except Exception:
+            pass
+
+    # 2. Nested document.id attribute (TL_inputMessageEntityCustomEmoji)
+    doc = getattr(ent, "document", None)
+    if doc is not None:
+        doc_id = getattr(doc, "id", None)
+        if doc_id is not None:
+            try:
+                val = int(doc_id)
+                if val != 0:
+                    return val
+            except Exception:
+                pass
+
+    # 3. Direct id if entity is Document
+    if hasattr(ent, "id") and "Document" in type(ent).__name__:
+        try:
+            val = int(getattr(ent, "id", 0) or 0)
+            if val != 0:
+                return val
+        except Exception:
+            pass
+
+    return 0
+
 def _convert_custom_emojis_to_text_urls(entities: Any) -> Any:
-    """Преобразует TL_messageEntityCustomEmoji -> TL_messageEntityTextUrl (tg://emoji?id=...)
-    при отправке сообщений без официального Premium."""
+    """Преобразует TL_messageEntityCustomEmoji / TL_inputMessageEntityCustomEmoji
+    -> TL_messageEntityTextUrl (tg://emoji?id=...) при отправке сообщений без официального Premium."""
     if not entities:
         return entities
 
     try:
+        is_py_list = isinstance(entities, list)
+        is_java_list = (not is_py_list) and hasattr(entities, "size") and hasattr(entities, "get")
+        count = len(entities) if is_py_list else (entities.size() if is_java_list else len(entities))
+        if count == 0:
+            return entities
+
+        # ── Fast-path pre-check: есть ли кастомные эмодзи ──
         has_custom_emoji = False
-        for ent in entities:
-            if ent is not None:
-                doc_id = getattr(ent, "document_id", None)
-                if doc_id is not None and int(doc_id) != 0:
-                    has_custom_emoji = True
-                    break
-                if "CustomEmoji" in type(ent).__name__:
-                    has_custom_emoji = True
-                    break
+        for i in range(count):
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
+            if ent is not None and _get_entity_doc_id(ent) != 0:
+                has_custom_emoji = True
+                break
 
         if not has_custom_emoji:
             return entities
@@ -459,22 +499,21 @@ def _convert_custom_emojis_to_text_urls(entities: Any) -> Any:
         if TLRPC is None:
             return entities
 
-        is_py_list = isinstance(entities, list)
-        new_list = list(entities) if is_py_list else list(entities)
         modified = False
-
-        for i, ent in enumerate(new_list):
+        new_list = []
+        for i in range(count):
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
             if ent is not None:
-                doc_id = getattr(ent, "document_id", None)
-                if (doc_id is not None and int(doc_id) != 0) or "CustomEmoji" in type(ent).__name__:
-                    doc_id_val = int(doc_id) if doc_id is not None else 0
-                    if doc_id_val != 0:
-                        tu = TLRPC.TL_messageEntityTextUrl()
-                        tu.offset = int(getattr(ent, "offset", 0) or 0)
-                        tu.length = int(getattr(ent, "length", 0) or 0)
-                        tu.url = f"tg://emoji?id={doc_id_val}"
-                        new_list[i] = tu
-                        modified = True
+                doc_id_val = _get_entity_doc_id(ent)
+                if doc_id_val != 0:
+                    tu = TLRPC.TL_messageEntityTextUrl()
+                    tu.offset = int(getattr(ent, "offset", 0) or 0)
+                    tu.length = int(getattr(ent, "length", 0) or 0)
+                    tu.url = f"tg://emoji?id={doc_id_val}"
+                    new_list.append(tu)
+                    modified = True
+                    continue
+            new_list.append(ent)
 
         if not modified:
             return entities
@@ -501,9 +540,16 @@ def _convert_text_urls_to_custom_emojis(entities: Any) -> Any:
         return entities
 
     try:
-        # Fast-path: проверяем наличие URL без JNI-рефлексии type(ent).__name__
+        is_py_list = isinstance(entities, list)
+        is_java_list = (not is_py_list) and hasattr(entities, "size") and hasattr(entities, "get")
+        count = len(entities) if is_py_list else (entities.size() if is_java_list else len(entities))
+        if count == 0:
+            return entities
+
+        # ── Fast-path: проверяем наличие URL ──
         has_emoji_url = False
-        for ent in entities:
+        for i in range(count):
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
             if ent is not None:
                 url = getattr(ent, "url", None)
                 if url and "emoji" in str(url):
@@ -524,11 +570,10 @@ def _convert_text_urls_to_custom_emojis(entities: Any) -> Any:
         if TLRPC is None:
             return entities
 
-        is_py_list = isinstance(entities, list)
-        new_list = list(entities) if not is_py_list else list(entities)
         modified = False
-
-        for i, ent in enumerate(new_list):
+        new_list = []
+        for i in range(count):
+            ent = entities[i] if is_py_list else (entities.get(i) if is_java_list else entities[i])
             if ent is not None:
                 url = getattr(ent, "url", None)
                 if url:
@@ -538,8 +583,10 @@ def _convert_text_urls_to_custom_emojis(entities: Any) -> Any:
                         ce.offset = int(getattr(ent, "offset", 0) or 0)
                         ce.length = int(getattr(ent, "length", 0) or 0)
                         ce.document_id = int(doc_id)
-                        new_list[i] = ce
+                        new_list.append(ce)
                         modified = True
+                        continue
+            new_list.append(ent)
 
         if not modified:
             return entities
@@ -1220,11 +1267,15 @@ class Plugin(BasePlugin):
             return False
 
         if not profile:
-            try:
-                u._sp_v = (cur_ver, 0)
-            except Exception:
-                pass
-            return False
+            if is_my_acc:
+                slot_idx = getattr(self, "_own_slots_cache", {}).get(uid, 0)
+                profile = self._get_profile_dict_for_slot(slot_idx, uid)
+            if not profile:
+                try:
+                    u._sp_v = (cur_ver, 0)
+                except Exception:
+                    pass
+                return False
 
         # Только для пользователей SyncProfile: проверка видеоаватарки
         if uid not in self._video_checked_uids:

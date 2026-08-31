@@ -2049,6 +2049,63 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             self.assertEqual(len(module._PATCHED_MSGS), 0)
             self.assertEqual(len(module._FIND_CLASS_CACHE), 0)
 
+    def test_custom_emoji_bidirectional_conversion_and_input_entities(self):
+        """Тест: конвертация кастомных эмодзи поддерживает как TL_messageEntityCustomEmoji, так и TL_inputMessageEntityCustomEmoji."""
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+
+            class FakeTLRPC:
+                class TL_messageEntityTextUrl:
+                    def __init__(self):
+                        self.offset = 0
+                        self.length = 0
+                        self.url = ""
+                class TL_messageEntityCustomEmoji:
+                    def __init__(self):
+                        self.offset = 0
+                        self.length = 0
+                        self.document_id = 0
+
+            module.TLRPC = FakeTLRPC
+
+            class MockTLMessageCustomEmoji:
+                def __init__(self, offset, length, doc_id):
+                    self.offset = offset
+                    self.length = length
+                    self.document_id = doc_id
+
+            class MockTLInputCustomEmoji:
+                def __init__(self, offset, length, doc_id):
+                    self.offset = offset
+                    self.length = length
+                    class InputDoc:
+                        def __init__(self, did):
+                            self.id = did
+                    self.document = InputDoc(doc_id)
+
+            class MockTLTextUrl:
+                def __init__(self, offset, length, url):
+                    self.offset = offset
+                    self.length = length
+                    self.url = url
+
+            ents_msg = [MockTLMessageCustomEmoji(0, 2, 5384123456789012345)]
+            ents_input = [MockTLInputCustomEmoji(5, 2, 9876543210123456789)]
+
+            converted_msg = module._convert_custom_emojis_to_text_urls(ents_msg)
+            self.assertEqual(len(converted_msg), 1)
+            self.assertEqual(converted_msg[0].url, "tg://emoji?id=5384123456789012345")
+
+            converted_input = module._convert_custom_emojis_to_text_urls(ents_input)
+            self.assertEqual(len(converted_input), 1)
+            self.assertEqual(converted_input[0].url, "tg://emoji?id=9876543210123456789")
+
+            # Reverse conversion from tg://emoji?id=...
+            urls = [MockTLTextUrl(0, 2, "tg://emoji?id=5384123456789012345")]
+            rev = module._convert_text_urls_to_custom_emojis(urls)
+            self.assertEqual(len(rev), 1)
+            self.assertEqual(rev[0].document_id, 5384123456789012345)
+
 if __name__ == "__main__":
     unittest.main()
 
