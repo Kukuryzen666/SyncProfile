@@ -1,4 +1,4 @@
-name: Release Validation
+name: CI & Plugin Validation
 
 on:
   push:
@@ -8,7 +8,7 @@ on:
 
 jobs:
   validate:
-    name: Verify Plugin Binaries
+    name: Verify Plugin Binaries & Tests
     runs-on: ubuntu-latest
     steps:
       - name: Checkout repository
@@ -19,7 +19,7 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Verify plugin binaries
+      - name: Verify and compile plugin binaries
         run: python build_plugins.py
 
       - name: Run unit tests
