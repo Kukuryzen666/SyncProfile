@@ -1267,16 +1267,17 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             self.assertEqual(len(bulletin_calls), 1)
             self.assertIn("Этот чат/канал использует SyncProfile", bulletin_calls[0])
 
-    def test_exteragram_sync_in_progress_guard(self):
-        module = load_plugin_module("sync_exteragram.plugin")
-        plugin = module.Plugin()
-        self.assertFalse(plugin._sync_in_progress)
+    def test_sync_in_progress_guard_both_plugins(self):
+        for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
+            module = load_plugin_module(mod_file)
+            plugin = module.Plugin()
+            self.assertFalse(plugin._sync_in_progress)
 
-        plugin._sync_in_progress = True
-        # Calling _sync_database while in progress should exit immediately
-        plugin._sync_database(show_bulletin=False)
-        self.assertTrue(plugin._sync_in_progress)
-        plugin._sync_in_progress = False
+            plugin._sync_in_progress = True
+            # Calling _sync_database while in progress should exit immediately
+            plugin._sync_database(show_bulletin=False)
+            self.assertTrue(plugin._sync_in_progress)
+            plugin._sync_in_progress = False
 
     def test_user_full_and_chat_full_permanent_signature(self):
         for mod_file in ("sync_ayugram.plugin", "sync_exteragram.plugin"):
@@ -1740,6 +1741,9 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
 
                 # dialogFilters should remain unchanged by plugin
                 self.assertEqual(len(mock_mc_instance.dialogFilters), 3)
+                # Own account profile must be populated in _profiles_cache and _profiles_snapshot
+                self.assertIn(12345, plugin._profiles_cache)
+                self.assertIn(12345, plugin._profiles_snapshot)
             finally:
                 if orig_mc is not None:
                     tg_messenger.MessagesController = orig_mc

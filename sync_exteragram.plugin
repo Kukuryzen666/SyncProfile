@@ -46,11 +46,6 @@ try:
         JsonCacheFile,
         build_log,
         build_bulletin_helper,
-        HookUtils,
-        UI,
-        Localization,
-        add_autoupdater_task,
-        remove_autoupdater_task,
     )
     HAS_ZWYLIB = True
     logger = build_log("SyncProfile")
@@ -91,7 +86,7 @@ __id__ = "sync_profile_exteragram"
 __name__ = "SyncProfile [exteraGram]"
 __description__ = "Синхронизация кастомного профиля и встроенный Local Premium (отправка и отображение кастомных эмодзи, повышенные лимиты, премиум стикеры/реакции) для клиентов exteraGram."
 __author__ = "@Kukuryzen"
-__version__ = "10.3.26"
+__version__ = "10.3.27"
 __icon__ = "exteraPlugins/1"
 __app_version__ = ">=12.5.1"
 __sdk_version__ = ">=1.4.3.3"
@@ -1125,8 +1120,9 @@ class Plugin(BasePlugin):
 
     def _get_active_accounts_data(self, force: bool = False) -> List[Dict[str, Any]]:
         now = time.time()
-        if not force and self._cached_active_accs is not None and (now - self._cached_active_accs_time) < 300.0:
-            return self._cached_active_accs
+        with self._sync_lock:
+            if not force and self._cached_active_accs is not None and (now - self._cached_active_accs_time) < 300.0:
+                return list(self._cached_active_accs)
 
         accounts = []
         try:
@@ -1188,10 +1184,11 @@ class Plugin(BasePlugin):
                 pass
 
         accounts.sort(key=lambda x: x["acc_idx"])
-        self._cached_active_accs = accounts
-        self._cached_active_accs_time = now
-        self._own_uids_cache = {acc["user_id"] for acc in accounts if acc.get("user_id", 0) > 0}
-        self._own_slots_cache = {acc["user_id"]: acc["acc_idx"] for acc in accounts if acc.get("user_id", 0) > 0}
+        with self._sync_lock:
+            self._cached_active_accs = accounts
+            self._cached_active_accs_time = now
+            self._own_uids_cache = {acc["user_id"] for acc in accounts if acc.get("user_id", 0) > 0}
+            self._own_slots_cache = {acc["user_id"]: acc["acc_idx"] for acc in accounts if acc.get("user_id", 0) > 0}
         return accounts
 
     def _get_slot_val(self, acc_idx: int, key: str, default: Any) -> Any:
@@ -2210,26 +2207,27 @@ class Plugin(BasePlugin):
 
     def _trim_memory_caches(self):
         """Периодическая очистка кэшей памяти для предотвращения утечек при долгой сессии."""
+        global _PATCHED_MSGS, _USER_CLASS_CACHE, _CHAT_CLASS_CACHE, _FIND_CLASS_CACHE
         self._trim_cache(_emoji_status_cache, 200)
         self._trim_cache(_peer_color_cache, 200)
         self._trim_cache(_EMOJI_DOC_ID_CACHE, 500)
         if len(self._video_checked_uids) > 1000:
-            self._video_checked_uids.clear()
-            self._video_avatar_uids.clear()
+            self._video_checked_uids = set()
+            self._video_avatar_uids = set()
         if len(self._video_checked_chat_ids) > 500:
-            self._video_checked_chat_ids.clear()
+            self._video_checked_chat_ids = set()
         if len(self._handled_uids) > 1000:
-            self._handled_uids.clear()
+            self._handled_uids = set()
         if len(self._handled_cids) > 500:
-            self._handled_cids.clear()
+            self._handled_cids = set()
         if len(_PATCHED_MSGS) > 2000:
-            _PATCHED_MSGS.clear()
+            _PATCHED_MSGS = set()
         if len(_USER_CLASS_CACHE) > 100:
-            _USER_CLASS_CACHE.clear()
+            _USER_CLASS_CACHE = {}
         if len(_CHAT_CLASS_CACHE) > 100:
-            _CHAT_CLASS_CACHE.clear()
+            _CHAT_CLASS_CACHE = {}
         if len(_FIND_CLASS_CACHE) > 200:
-            _FIND_CLASS_CACHE.clear()
+            _FIND_CLASS_CACHE = {}
 
     def _keep_alive_sync_loop(self):
         """Синхронный keep-alive loop. Использует threading.Event.wait() вместо
@@ -2525,20 +2523,16 @@ class Plugin(BasePlugin):
                     patches.append(patch_tuple)
 
                     # Баг 3: проверяем, изменились ли данные собственного профиля
-                    own_cache = getattr(plugin_self, "_own_apply_cache", {})
-                    cached_tuple = own_cache.get(my_uid)
-                    if cached_tuple != patch_tuple:
-                        any_changed = True
-                        if not hasattr(plugin_self, "_own_apply_cache"):
-                            plugin_self._own_apply_cache = {}
-                        plugin_self._own_apply_cache[my_uid] = patch_tuple
+                    with plugin_self._sync_lock:
+                        cached_tuple = plugin_self._own_apply_cache.get(my_uid)
+                        if cached_tuple != patch_tuple:
+                            any_changed = True
+                            plugin_self._own_apply_cache[my_uid] = patch_tuple
 
                 # Обновляем кэш UID собственных аккаунтов
                 plugin_self._own_uids_cache = {acc["user_id"] for acc in active_accs if acc.get("user_id", 0) > 0}
 
                 plugin_self._update_snapshot_partial({p[1] for p in patches})
-
-
 
                 def ui_apply(patches=patches, any_changed=any_changed):
                     try:
@@ -2584,7 +2578,8 @@ class Plugin(BasePlugin):
             return
 
         # Инвалидируем кэш чтобы ui_apply применился после публикации
-        self._own_apply_cache.pop(uid, None)
+        with self._sync_lock:
+            self._own_apply_cache.pop(uid, None)
         payload = self._get_profile_dict_for_slot(acc_idx, uid)
         def worker():
             try:
@@ -2633,8 +2628,9 @@ class Plugin(BasePlugin):
             return
 
         # Инвалидируем кэш чтобы ui_apply применился после публикации
-        for acc in active_accs:
-            self._own_apply_cache.pop(acc.get("user_id", 0), None)
+        with self._sync_lock:
+            for acc in active_accs:
+                self._own_apply_cache.pop(acc.get("user_id", 0), None)
 
         def worker():
             success_count = 0
