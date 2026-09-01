@@ -12,6 +12,7 @@ def main():
     plugins = [
         os.path.join(root, "sync_ayugram.plugin"),
         os.path.join(root, "sync_exteragram.plugin"),
+        os.path.join(root, "zwylib.plugin"),
     ]
 
     for p in plugins:
