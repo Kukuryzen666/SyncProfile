@@ -1737,7 +1737,10 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
                 plugin._apply_all_to_all_accounts()
 
                 import time
-                time.sleep(0.1)
+                for _ in range(50):
+                    if 12345 in plugin._profiles_cache:
+                        break
+                    time.sleep(0.05)
 
                 # dialogFilters should remain unchanged by plugin
                 self.assertEqual(len(mock_mc_instance.dialogFilters), 3)
@@ -2026,7 +2029,10 @@ class TestSyncProfileVideoAndLogic(unittest.TestCase):
             plugin._api_request = lambda method, path, **kwargs: (200, {"status": "ok"}, None)
 
             plugin.push_all_accounts(show_ui_bulletin=False)
-            time.sleep(0.1)  # Allow worker thread to complete
+            for _ in range(50):
+                if 111 in plugin._profiles_cache and 222 in plugin._profiles_cache:
+                    break
+                time.sleep(0.05)
 
             self.assertIn(111, plugin._profiles_cache)
             self.assertIn(222, plugin._profiles_cache)
